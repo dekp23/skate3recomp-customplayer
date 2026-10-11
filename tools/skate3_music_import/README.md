@@ -43,7 +43,25 @@ Tests: `python3 -m unittest discover -s tests -v`
 | MUS audio is EAAC: SNR header + SNS blocks | same file, `ea_eaac.c` | documented upstream |
 | MUS v5.2 table at 0x08, 0x0C-byte entries; v5.3 table at 0x28, 0x1C-byte entries, offsets ×0x10/×0x80 | same file | documented upstream |
 | MPF track info carries a MUS checksum = first 4 bytes of MUS | vgmstream enforces it | **whether the game checks it: unknown** |
-| Skate 3 X360 files are big-endian, which minor version, which codec | — | **unknown until run on the real files** |
+
+## Measured on the real files (skate3recomp v2.0.2 install, 2026-10-11)
+
+| File | Pathfinder | Endian | Tracks | Samples (MPF = MUS) | Codec | Validate |
+|---|---|---|---|---|---|---|
+| `ipod.mpf` + `Ipod_Stream.mus` (180,580,480 B) | v5.3 | big | 2 (track 1 empty, checksum `F1F1F1F1`) | 1380 | EA-XMA, 44.1 kHz, 2 ch, STREAM, no loops | PASS |
+| `game.mpf` + `Game_Stream.mus` (28,052,480 B) | v5.3 | big | 1 | 1074 | EA-XMA, 44.1 kHz, 2 ch | PASS |
+| `world.mpf` | v5.3 | big | 1 | 5725 | (MUS not yet checked) | — |
+
+- iPod segments are 3.6–12.3 s each (most ~9.5 s); total 145.2 min across 2116 nodes.
+  So a song is a **chain of segments linked by MPF nodes**, not one stream. Inference:
+  song boundaries are recoverable from the node graph; not yet done.
+- vgmstream (upstream master, built **with FFmpeg**) decodes segment 1 to 9.50 s of
+  non-silent stereo PCM. Without FFmpeg, vgmstream cannot open EA-XMA at all
+  (`#ifdef VGM_USE_FFMPEG` in `ea_eaac.c`). For `probe`, use a release build of
+  vgmstream-cli, which bundles FFmpeg.
+- Consequence for import: replacement audio must be **EA-XMA** (XMA2 in EA's SNR/SNS
+  wrapper), or the runtime must be made to accept another codec. An XMA2 encoder is
+  the critical unknown for option 1/2.
 
 ## Why not MPFmaster directly
 
@@ -63,9 +81,9 @@ reference for the write side.
 
 ## Roadmap
 
-1. *(this)* Inspect/validate/backup. Run on the real `ipod.mpf` and report output.
-2. Identify the codec. If EA-XMA (code 0x03, X360 typical), an encoder is the main
-   obstacle; if EALayer3, EA's `sx`/community encoders may apply. Decide from data.
+1. *(done)* Inspect/validate/backup; run on the real files (see above).
+2. Codec identified: EA-XMA. Next: (a) find an XMA2 encoder usable offline, and
+   (b) decode the MPF node graph to recover song boundaries and names.
 3. Byte-exact round-trip: rebuild the MUS from its own parsed entries and confirm
    identical bytes. Proves the writer before any audio changes.
 4. Replace one stream with an encoded user track of equal or shorter length, update MPF

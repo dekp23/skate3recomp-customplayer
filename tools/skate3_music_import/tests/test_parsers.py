@@ -99,6 +99,19 @@ class ValidateTests(unittest.TestCase):
                             for f in findings))
 
 
+class EmptyTrackTests(unittest.TestCase):
+    def test_empty_placeholder_track_is_not_an_error(self):
+        # Mirrors real Skate 3 ipod.mpf: track 1 starts at 0 with checksum 0xF1F1F1F1.
+        mus_b, layout = fx.build_mus_v53(streams=two_streams())
+        samples = [(bo // 0x80, d) for (_, bo), d in zip(layout, (2000, 3000))]
+        mpf = parse_mpf(fx.build_mpf(minor=3, track_starts=(0, 0),
+                                     checksums=(0xC0FFEE11, 0xF1F1F1F1), samples=samples))
+        mus = parse_mus(mus_b, 3, ">")
+        findings = validate_pair(mpf, mus, track_index=1)
+        self.assertFalse([f for f in findings if f.level == "ERROR"])
+        self.assertTrue(any("is empty" in f.message for f in findings))
+
+
 class CliTests(unittest.TestCase):
     def test_end_to_end_folder(self):
         with tempfile.TemporaryDirectory() as td:

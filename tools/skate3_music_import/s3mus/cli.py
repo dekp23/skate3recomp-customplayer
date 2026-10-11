@@ -100,6 +100,11 @@ def validate_pair(mpf: MpfFile, mus: MusFile, track_index: int = 0) -> List[Find
     if mpf.offsets["mapfilelen"] != mpf.size:
         add("WARN", f"MPF mapfilelen 0x{mpf.offsets['mapfilelen']:X} != file size 0x{mpf.size:X}")
 
+    if len(rng) == 0:
+        add("INFO", f"track {track_index} is empty (no samples; checksum field "
+                    f"0x{track.mus_checksum:08X} is not checked); it does not use this MUS")
+        return out
+
     if track.is_ram:
         add("WARN", f"track {track_index} is a RAM track ({track.num_subbanks} sub-banks); "
                     f"per-sample checks below assume STREAM layout")

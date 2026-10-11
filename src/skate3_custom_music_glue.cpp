@@ -7,6 +7,7 @@
 
 #include <rex/audio/xma/frame_filter.h>
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 
 REXCVAR_DEFINE_BOOL(skate3_custom_music, true, "Skate 3",
@@ -14,7 +15,8 @@ REXCVAR_DEFINE_BOOL(skate3_custom_music, true, "Skate 3",
                     "tools/skate3_music_import (no effect if the folder is missing)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(skate3_custom_music_dir, "", "Skate 3",
-                      "Custom music folder (default: <game>/data/audio/music/custom)")
+                      "Custom music folder (default: custom_music next to the executable, "
+                      "else <game>/data/audio/music/custom)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace skate3::custom_music {
@@ -42,10 +44,17 @@ void Install(const std::filesystem::path& game_data_root) {
     REXLOG_INFO("custom music: disabled by skate3_custom_music=false");
     return;
   }
+  // Lookup order: explicit cvar, then "custom_music" next to the executable (portable,
+  // independent of settings.toml, which the settings menu rewrites with its own keys
+  // only), then the game data folder.
   std::filesystem::path dir;
   const std::string configured = REXCVAR_GET(skate3_custom_music_dir);
+  std::error_code ec;
+  const auto beside_exe = rex::filesystem::GetAppRootFolder() / "custom_music";
   if (!configured.empty()) {
     dir = PathFromUtf8(configured);
+  } else if (std::filesystem::is_directory(beside_exe, ec)) {
+    dir = beside_exe;
   } else {
     dir = game_data_root / "data" / "audio" / "music" / "custom";
   }

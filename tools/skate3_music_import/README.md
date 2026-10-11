@@ -1,93 +1,124 @@
 # skate3_music_import
 
-Read-only tooling for Skate 3's (Xbox 360) interactive-music files, as installed by
-skate3recomp under `game\data\audio\music\`. Milestone 1 of a custom-music import
-project. **Nothing here modifies game files.**
+Custom music for Skate 3 in skate3recomp. Your own tracks replace the in-game iPod
+songs **at the recomp's XMA decoder output**. Game files are never modified.
 
-Requires Python 3.8+. No third-party packages. `vgmstream-cli` is optional.
+Two parts:
 
-## Commands
+- **This Python tool** (Python 3.8+, no packages; `ffmpeg` for `prepare`): inspects the
+  game's music files, fingerprints every iPod XMA packet, converts your music and
+  assigns it to the 46 in-game song slots.
+- **Runtime** (`src/skate3_custom_music*.cpp` + a frame-filter hook in the rexglue SDK
+  fork): for each decoded XMA frame whose packet is an iPod packet, writes your PCM at
+  the exact song position instead. SFX, menu and world music pass through.
 
-Run from this folder (Windows: `py` instead of `python3`).
+## Using it
+
+1. Build this fork of skate3recomp (see the repo README, "Building from Source"). The
+   submodule `third_party/rexglue-sdk` points at the fork with the hook
+   (`dekp23/rexglue-skate3-customplayer`, branch `custom-music-hook`):
+   `git submodule sync --recursive && git submodule update --init --recursive`.
+2. Install ffmpeg (Windows: `winget install Gyan.FFmpeg`), then from this folder:
+   ```
+   py skate3_music_import.py backup  "C:\...\game\data\audio\music"
+   py skate3_music_import.py prepare "C:\...\game\data\audio\music" "C:\path\to\my music"
+   ```
+   This writes `...\music\custom\` (index, manifest, converted PCM; ~10 MB per minute)
+   and prints which track went to which slot. Re-run any time your music changes.
+3. Start the game. The log should show
+   `custom music: loaded 93588 fingerprints, N/46 iPod songs replaced`, then on first
+   iPod playback `custom music: first iPod frame replaced`. Shutdown logs statistics.
+
+Options: `--fill original` keeps the game's song for unused slots (default `repeat`
+reuses your tracks); `--gain-db -3` adjusts level. Settings: `skate3_custom_music`
+(on/off), `skate3_custom_music_dir` (folder override).
+
+### Current limitations (honest list)
+
+- **Song length is fixed by the game slot.** A track plays for exactly as long as the
+  in-game song it replaces (109–369 s). Shorter tracks end in silence until the slot
+  ends; longer ones are cut. `prepare` best-fits lengths and reports both cases.
+- Track titles shown in-game are still the original artists/titles.
+- Only the default XMA decoder path is hooked (`xma_use_old_decoder = true`, the default).
+- **Not yet confirmed in-game.** Everything below "Verification" is offline. The key
+  assumption is that the game plays iPod music through hardware XMA contexts; the log
+  lines above confirm or refute it on first run.
+
+## Inspection commands
 
 ```
-# 1. Back up first. Copies the folder and writes a SHA-256 manifest, verified after copy.
-python3 skate3_music_import.py backup "C:\...\Skate3Recomp-Windows\game\data\audio\music"
-
-# 2. Structure + per-stream codec/rate/channels/duration
-python3 skate3_music_import.py inspect "...\music\ipod.mpf"            # first 40 rows
-python3 skate3_music_import.py inspect "...\music\ipod.mpf" --limit 0  # all rows
-python3 skate3_music_import.py inspect "...\music\ipod.mpf" --json > ipod.json
-
-# 3. Consistency checks (exit 0 = PASS, 1 = errors, 2 = unparseable)
-python3 skate3_music_import.py validate "...\music\ipod.mpf"
-
-# 4. Optional: ask vgmstream for its reading of subsongs 1 and 2
-python3 skate3_music_import.py probe "...\music\ipod.mpf" --subsong 1 --subsong 2 --vgmstream C:\path\vgmstream-cli.exe
-
-# 5. Later: confirm the folder is still identical to a backup
-python3 skate3_music_import.py verify "...\music" "...\music_backup_YYYYMMDD-HHMMSS"
+py skate3_music_import.py inspect  "...\music\ipod.mpf" [--limit 0] [--json]
+py skate3_music_import.py validate "...\music\ipod.mpf"          # exit 0 PASS / 1 errors
+py skate3_music_import.py index    "...\music\ipod.mpf" --out ipod.s3fp   # lists songs
+py skate3_music_import.py probe    "...\music\ipod.mpf" --subsong 1 --vgmstream PATH
+py skate3_music_import.py verify   "...\music" "...\music_backup_YYYYMMDD-HHMMSS"
 ```
 
-The `.mus` is found automatically for `game.mpf`, `ipod.mpf`, `world.mpf` (pairs taken
-from vgmstream's table, labelled there "Skate 1/2/3"). Use `--mus` otherwise.
+## Why runtime replacement, not re-encoding the game files
 
-Tests: `python3 -m unittest discover -s tests -v`
+- The music is EA-XMA (XMA2 in EA's SNR/SNS wrapper). The only XMA2 encoder is
+  Microsoft's, licensed to registered Xbox developers. FFmpeg's `xma1`, `xma2` and
+  `wmapro` are decode-only (checked with `ffmpeg -codecs`).
+- MPFmaster reads little-endian only (its own TODO); these files are big-endian.
+- rexglue already decodes every XMA frame with FFmpeg in `XmaContext::DecodeOldFrame`,
+  so replacing decoded PCM there needs no encoder and no game-file changes.
+- rexglue's bundled FFmpeg is trimmed to `libavcodec`/`libavutil` with XMA/WMA Pro only,
+  so user audio is converted offline by `prepare` to raw 44.1 kHz stereo PCM.
 
-## Format facts and their sources
+## Format facts
 
-| Fact | Source | Status |
-|---|---|---|
-| `game/ipod/world.mpf` pair with `Game/Ipod/World_Stream.mus` in Skate 1/2/3 | vgmstream `src/meta/ea_eaac_mpf_mus.c` | documented upstream |
-| MPF magic `PFDx`, Pathfinder v5, minor 2 or 3; either byte order | same file | documented upstream |
-| MUS audio is EAAC: SNR header + SNS blocks | same file, `ea_eaac.c` | documented upstream |
-| MUS v5.2 table at 0x08, 0x0C-byte entries; v5.3 table at 0x28, 0x1C-byte entries, offsets ×0x10/×0x80 | same file | documented upstream |
-| MPF track info carries a MUS checksum = first 4 bytes of MUS | vgmstream enforces it | **whether the game checks it: unknown** |
+Upstream-documented (vgmstream `src/meta/ea_eaac_mpf_mus.c`, `ea_eaac.c`,
+`ea_eaac_streamfile.h`): `game/ipod/world.mpf` pair with `*_Stream.mus` in Skate 1/2/3;
+MPF magic `PFDx`, Pathfinder v5.2/5.3, either byte order; EAAC SNR+SNS audio; MUS v5.3
+table at 0x28 with 0x1C-byte entries; EA-XMA SNS blocks = header, samples, per-stream
+`size*4` + XMA packet data.
 
-## Measured on the real files (skate3recomp v2.0.2 install, 2026-10-11)
+Measured on the real v2.0.2 install (2026-10-11):
 
-| File | Pathfinder | Endian | Tracks | Samples (MPF = MUS) | Codec | Validate |
+| File | Pathfinder | Endian | Tracks | Samples | Codec | Validate |
 |---|---|---|---|---|---|---|
-| `ipod.mpf` + `Ipod_Stream.mus` (180,580,480 B) | v5.3 | big | 2 (track 1 empty, checksum `F1F1F1F1`) | 1380 | EA-XMA, 44.1 kHz, 2 ch, STREAM, no loops | PASS |
-| `game.mpf` + `Game_Stream.mus` (28,052,480 B) | v5.3 | big | 1 | 1074 | EA-XMA, 44.1 kHz, 2 ch | PASS |
-| `world.mpf` | v5.3 | big | 1 | 5725 | (MUS not yet checked) | — |
+| `ipod.mpf` + `Ipod_Stream.mus` (180,580,480 B) | v5.3 | big | 2 (track 1 empty, checksum `F1F1F1F1`) | 1380 | EA-XMA 44.1 kHz stereo | PASS |
+| `game.mpf` + `Game_Stream.mus` (28,052,480 B) | v5.3 | big | 1 | 1074 | EA-XMA 44.1 kHz stereo | PASS |
+| `world.mpf` | v5.3 | big | 1 | 5725 | MUS not checked | — |
 
-- iPod segments are 3.6–12.3 s each (most ~9.5 s); total 145.2 min across 2116 nodes.
-  So a song is a **chain of segments linked by MPF nodes**, not one stream. Inference:
-  song boundaries are recoverable from the node graph; not yet done.
-- vgmstream (upstream master, built **with FFmpeg**) decodes segment 1 to 9.50 s of
-  non-silent stereo PCM. Without FFmpeg, vgmstream cannot open EA-XMA at all
-  (`#ifdef VGM_USE_FFMPEG` in `ea_eaac.c`). For `probe`, use a release build of
-  vgmstream-cli, which bundles FFmpeg.
-- Consequence for import: replacement audio must be **EA-XMA** (XMA2 in EA's SNR/SNS
-  wrapper), or the runtime must be made to accept another codec. An XMA2 encoder is
-  the critical unknown for option 1/2.
+- iPod: 1380 segments = **46 runs of 30 equal-length segments**. Inference (not yet
+  cross-checked against the MPF node graph): 46 songs, each cut into 30 parts;
+  lengths 109–369 s, total 145.2 min.
+- One trimmed XMA packet per SNS block (< 2048 bytes; the game pads it for hardware).
+  93,589 packets; block samples sum exactly to each SNR sample count.
+- Every segment: first packet decodes 384 samples more than it declares (decoder
+  delay); middle packets exact; 515–713 samples of overrun at the end. The runtime
+  maps decoded sample `d` of a segment to song position `segment_start + d - 384`.
+- Fingerprint = FNV-1a 64 of packet bytes [4, 260): 93,588 unique (1 duplicate,
+  117 packets too short and bridged at runtime); 0 collisions with `Game_Stream.mus`.
 
-## Why not MPFmaster directly
+## Verification
 
-MPFmaster (xan1242) reads structs in native little-endian with no byte-swapping; its
-source and README list big-endian/console support as TODO. If the X360 files are
-big-endian (likely, unverified), MPFmaster will misread them. Its sample-update path
-also targets the EA-SCHL/GSTR and EALayer3 (v5.3-style) layouts. It remains the best
-reference for the write side.
+- 17 Python unit tests (`py -m unittest discover -s tests`).
+- vgmstream + FFmpeg decodes real iPod segment 1 to 9.50 s of non-silent stereo audio.
+- C++ engine replay on real data (`tests/cpp/test_custom_music.cpp` + `tests/sim_stream.py`):
+  real iPod packets padded to 2048 bytes, two songs interleaved on two contexts plus
+  `Game_Stream` packets, an unassigned song and a reset-and-reused context.
+  Result: 22,560/22,560 frames replaced, **0 wrong samples** versus the expected user
+  PCM, 0 false replacements. Clean under ASan/UBSan, `-Wall -Wextra -Werror`, C++17/20/23.
+- rexglue `xma_context.cpp` with the hook and the glue file pass Clang 18 C++23
+  semantic checks against the real SDK headers. **The full recomp has not been built
+  here** (needs your game dump; too large for this machine).
 
-## Verification done
-
-- 10 unit tests over synthetic fixtures (both endians, v5.2 and v5.3, corruption cases).
-- Synthetic PCM16BE pairs in all four layout/endian combinations were read by an actual
-  `vgmstream-cli` build (upstream master) with matching rate, channels and sample counts.
-- **Not yet run on real Skate 3 files.** The fixtures prove agreement with vgmstream's
-  documented layout, not with the game.
+```
+c++ -std=c++23 -O2 -Isrc src/skate3_custom_music.cpp tools/skate3_music_import/tests/cpp/test_custom_music.cpp -o test_custom_music
+python3 tools/skate3_music_import/tests/sim_stream.py MUSIC/ipod.mpf MUSIC/game.mpf sim.bin
+./test_custom_music MUSIC/custom sim.bin
+```
 
 ## Roadmap
 
-1. *(done)* Inspect/validate/backup; run on the real files (see above).
-2. Codec identified: EA-XMA. Next: (a) find an XMA2 encoder usable offline, and
-   (b) decode the MPF node graph to recover song boundaries and names.
-3. Byte-exact round-trip: rebuild the MUS from its own parsed entries and confirm
-   identical bytes. Proves the writer before any audio changes.
-4. Replace one stream with an encoded user track of equal or shorter length, update MPF
-   duration/offset entries, test in-game.
-5. Folder-to-playlist converter (option 2 of the handoff), or runtime hook (option 3).
+1. *(done)* Inspector/validator; codec identified; runtime replacement engine + hook.
+2. **Next: first in-game test** on Windows; read the log lines above.
+3. Decode the MPF node graph: confirm song boundaries, find title strings, map in-game
+   "next track" behaviour.
+4. Remove the slot-length limit: build longer "carrier" songs by reusing existing XMA
+   packets in a rewritten `.mus`/`.mpf` (no encoder needed, since the runtime replaces
+   the audio anyway).
 
 Legal: use only your own game copy; don't distribute game files or copyrighted music.

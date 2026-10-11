@@ -1,5 +1,6 @@
 #include "skate3_app_common.h"
 
+#include "skate3_custom_music_glue.h"
 #include "skate3_demo_path.h"
 #include "skate3_fov.h"
 #include "skate3_iso_installer.h"
@@ -784,6 +785,7 @@ void Skate3BaseApp::OnPostSetup() {
   }
   InstallDlcPackages();
   InstallRecipeOverlay();
+  skate3::custom_music::Install(runtime()->game_data_root());
 
   // Register retail multi-entry-function alternate entries.
 #if !SKATE3_HAS_TITLE_UPDATE
@@ -814,6 +816,7 @@ void Skate3BaseApp::OnPostSetup() {
 }
 
 void Skate3BaseApp::OnShutdown() {
+  skate3::custom_music::Uninstall();
   rex::ui::UnregisterBind("bind_skate3_menu");
   rex::ui::UnregisterBind("bind_skate3_menu_alt");
   rex::ui::UnregisterBind("bind_skate3_save_draw_fingerprints");

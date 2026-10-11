@@ -20,7 +20,9 @@ from typing import List, Optional, Sequence
 
 from .xma import Song
 
-AUDIO_EXTS = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wav", ".wma", ".aiff", ".aif", ".alac"}
+# Any container FFmpeg can read; only the first audio stream is used (video is ignored).
+AUDIO_EXTS = {".mp3", ".flac", ".ogg", ".oga", ".opus", ".m4a", ".aac", ".wav", ".wma", ".aiff",
+              ".aif", ".alac", ".ape", ".wv", ".webm", ".mka", ".mp4", ".m4v", ".mkv", ".mov"}
 RATE = 44100
 BYTES_PER_SAMPLE_FRAME = 4  # stereo s16
 MANIFEST = "manifest.tsv"

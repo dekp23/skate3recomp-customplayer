@@ -30,8 +30,21 @@ Two parts:
    iPod playback `custom music: first iPod frame replaced`. Shutdown logs statistics.
 
 Options: `--fill original` keeps the game's song for unused slots (default `repeat`
-reuses your tracks); `--gain-db -3` adjusts level. Settings: `skate3_custom_music`
-(on/off), `skate3_custom_music_dir` (folder override).
+reuses your tracks); `--gain-db -3` adjusts level.
+
+Folder lookup at startup: cvar `skate3_custom_music_dir` (e.g. `--skate3_custom_music_dir=...`
+on the command line), else **`custom_music` next to `skate3.exe`**, else
+`<game>\data\audio\music\custom`. Don't rely on `settings.toml` for the folder: the
+settings menu rewrites that file with its own keys only. `skate3_custom_music=false`
+disables the feature.
+
+### One-click Windows scripts (`windows/`)
+
+Put the folder next to an existing Skate3Recomp install (e.g. `...\Skate3Recomp-Windows\custom_music_build`):
+`run_build.cmd` installs missing tools with winget, clones this fork into `C:\s3build`,
+downloads TU3, builds, and assembles `C:\s3build\Skate3Recomp-CustomMusic` (game folder linked,
+saves copied, `custom_music` linked to `C:\s3build\custom_music`). `run_prepare_music.cmd`
+converts everything in your Windows Music folder into `C:\s3build\custom_music`.
 
 ### Current limitations (honest list)
 

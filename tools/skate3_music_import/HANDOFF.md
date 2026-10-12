@@ -21,8 +21,8 @@
 
 | What | Where |
 |---|---|
-| Recomp fork | `dekp23/skate3recomp-customplayer`, branch `custom-music-import` (last: `9e4cf7e`) |
-| SDK fork | `dekp23/rexglue-skate3-customplayer`, branch `custom-music-hook` (`2832e85`: frame filter hook + public imgui pin) |
+| Recomp fork | `dekp23/skate3recomp-customplayer`, branch `custom-music-import` |
+| SDK fork | `dekp23/rexglue-skate3-customplayer`, branch `custom-music-hook` (`5df62be`: frame filter hook, imgui pin, XmaStreamDecoder) |
 | Build | `C:\s3build\skate3recomp` (script: `...\Skate3Recomp-Windows\custom_music_build\run_build.cmd`, ~10 min incremental) |
 | Test install | `C:\s3build\Skate3Recomp-CustomMusic\skate3.exe` (game folder linked, saves copied) |
 | Library | `C:\s3build\custom_music` (linked as `custom_music` next to the exe); index is v4 |
@@ -82,16 +82,30 @@ Toolchain on the laptop: LLVM 23.1.3, CMake 4.4.4, Ninja, VS 2026 Build Tools, P
       originals once with the Python tool + vgmstream (simple), or decode in-process with the
       runtime's FFmpeg XMA decoder (check what rexruntime.dll exports).
 
-### Phase 1 - our playlist drives the music
-- [ ] Library: originals decoded once to FLAC; your tracks converted to FLAC.
-- [ ] Engine: dr_flac decoding; "radio" scheduling - every iPod frame plays our playlist.
-      Position = f(game slot position), so prefetching contexts stay exact.
-- [ ] All 46 slots lengthened to the maximum (~15-20 min, existing MPF rewriter, node
-      budget 8000) so the game rarely changes song by itself.
-- [ ] Track change rules: our track ends -> next; game song changes mid-slot (skip) -> next.
-- [ ] F7 playlist editor: checkbox per entry (originals + yours), reorder, shuffle,
-      repeat; saved in the library. Prev / Next / Pause buttons; hotkeys TBD (Ctrl+F7/F8 collide, see Phase 0).
-- [ ] Remove the per-slot assignment + length-fit table from the menu.
+### Phase 1 - our playlist drives the music (code done 2026-10-12, needs in-game test)
+- [x] In-game decode of the game's songs: SDK `rex::audio::XmaStreamDecoder` (SDK 5df62be)
+      + `skate3_custom_music_mus` (MUS reader, index builder, segment join). No FLAC copy
+      of the originals is stored; they are decoded from Ipod_Stream.mus while playing
+      (0.4-0.9 s per song on the worker thread). Join: audio starts at lead+192 (=576),
+      missing tails (<=180 samples) predicted, 32-sample crossfade per join.
+- [x] Index built in-game (byte-identical to Python); no prepare script needed.
+- [x] Carrier layout: all 46 slots >= 19.9 min (budget 8000 nodes, 233 KB ipod.mpf),
+      written at startup if missing/different. Validated (Python validator, vgmstream).
+      **Not yet confirmed in game** (larger ipod.mpf).
+- [x] Player (`skate3_custom_music_player`): slot position = clock; anchors per slot;
+      slot ran out (<= 20 s left) -> continue; left early / restarted -> next entry;
+      late prefetch segment of the previous slot (< 3 s) ignored by the engine.
+- [x] F7: Previous / Next / Shuffle / Use my music / Pop-ups / Volume, playlist table
+      (on/off, Play, up/down, bulk on/off). Saved to playlist.tsv. Toast shows the entry.
+- [x] Rebuild writes tracks.tsv (your tracks); per-slot assignment and length fitting are
+      legacy (`fit_layout`), manifest.tsv optional.
+- [ ] In-game test: build 373ae46 (+SDK 5df62be). Check: decoder self-test line, "long
+      iPod slots active", music plays from the playlist, Next/Prev, in-game song pick ->
+      next entry, toast titles.
+- [ ] Your tracks still need ffmpeg for conversion (decision pending: auto-download a
+      static ffmpeg on first use vs. building more decoders into the runtime).
+- [ ] Pause: not offered (game appears to skip a song after ~16 s of silence).
+- [ ] Hotkeys for previous/next: Ctrl+F7/F8 collide; pick others.
 
 ### Phase 2 - metadata
 - [ ] ffprobe tags (title / artist / album); ffmpeg extracts embedded cover -> 256x256 RGBA.

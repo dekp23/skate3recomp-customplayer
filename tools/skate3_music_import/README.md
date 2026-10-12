@@ -15,34 +15,33 @@ Two parts:
 ## Using it
 
 1. Build this fork (see the repo README, or `windows/run_build.cmd`, which does it all).
-2. Once: `py skate3_music_import.py prepare "<game>\data\audio\music" "<some music>"`
-   (or `windows/run_prepare_music.cmd`). This creates the library, including the
-   fingerprint index `ipod.s3fp`, which the game cannot build itself.
+2. Start the game. The first start builds the music index from the game's own files
+   (about a second) and the long-slot layout; nothing to run by hand.
 3. In game, press **F7** (dekp23 Custom Music):
-   - **Import Music folder** / **Add tracks...** copy audio into `<library>\tracks` and
-     rebuild; **Rebuild library** re-scans that folder. Conversion uses ffmpeg
-     (`winget install Gyan.FFmpeg`) and runs in the background.
-   - **Use my music**, **Volume**, **Now-playing pop-ups**, **Leftover slots**
-     (repeat your tracks or keep game songs). Saved in `<library>\player.ini`.
-   - The slot table shows which track plays in which iPod slot and how it fits.
-4. **Song lengths** are fitted to your tracks: each slot is lengthened or shortened so
-   it ends within one segment (3.6-12.3 s) of your track. The game reads song lengths
-   at startup, so after a rebuild the menu asks you to **restart Skate 3**.
-5. When one of your tracks starts, a **NOW PLAYING** pop-up shows its title (bottom left).
+   - **Playlist**: the 46 Skate 3 songs and your tracks in one list. Tick what should
+     play, reorder with the arrows, **Play** any entry, **Shuffle**, **Previous / Next**.
+     Saved in `<library>\playlist.tsv`.
+   - **Add tracks...** / **Import Music folder** copy audio into `<library>\tracks` and
+     convert it in the background (needs ffmpeg for now: `winget install Gyan.FFmpeg`);
+     **Rescan tracks** re-reads that folder.
+   - **Use my music** (off = the game's normal soundtrack), **Pop-ups**, **Volume**
+     (`<library>\player.ini`).
+4. Picking a song in the game's own music player skips to the next playlist entry.
+5. A **NOW PLAYING** pop-up shows each new entry (bottom left).
 
 Library folder: `custom_music` next to `skate3.exe` (cvar `skate3_custom_music_dir`
 overrides; settings.toml is not used for it because the settings menu rewrites that file).
 
-### How song lengths work (no game file is modified)
+### How it works (no game file is modified)
 
-`ipod.mpf` links each song's 30 audio segments into a chain. The rebuild writes
-`<library>\ipod_layout.mpf`, in which a slot's chain replays the song's own segments
-(longer) or ends early (shorter); audio is replaced at runtime anyway, so the carrier
-content does not matter. Only nodes are appended, so existing node numbers stay valid.
-At startup the runtime builds `<library>\game_music` (hard links to the game's music
-files plus the layout as `ipod.mpf`) and mounts it over `data\audio\music` through the
-recomp's virtual file system. Requires the library and the game on the same drive
-(hard links); otherwise song lengths stay original.
+- The game keeps playing its iPod "slots". Every decoded XMA frame of a slot is replaced
+  with the playlist audio at the matching position, so the slot position is the clock.
+- The game's own songs are decoded in-game from `Ipod_Stream.mus` with the runtime's XMA
+  decoder (`rex::audio::XmaStreamDecoder`); no copy is stored.
+- Every slot is lengthened to ~20 minutes by a rewritten `ipod.mpf`
+  (`<library>\ipod_layout.mpf`, served through the recomp's virtual file system from
+  `<library>\game_music`, hard links + the layout). When a slot does run out, the
+  playlist simply continues. Requires the library and the game on the same drive.
 
 ### Limitations
 
@@ -50,8 +49,8 @@ recomp's virtual file system. Requires the library and the game on the same driv
   yours. Replacing the game's own text needs the title strings, which are in EA's
   compressed archives (not yet decoded).
 - Only the default XMA decoder path is hooked (`xma_use_old_decoder = true`).
-- `prepare` (Python) assigns tracks to the original slot lengths; the in-game Rebuild
-  is what fits lengths.
+- The 46 game songs are listed as "Skate 3 song N" until metadata lookup (Phase 2).
+- No pause: the game appears to skip a song after ~16 s of silence.
 
 ## Inspection commands
 

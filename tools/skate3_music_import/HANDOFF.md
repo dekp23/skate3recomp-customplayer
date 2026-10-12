@@ -41,13 +41,46 @@ Toolchain on the laptop: LLVM 23.1.3, CMake 4.4.4, Ninja, VS 2026 Build Tools, P
 
 ## Plan
 
-### Phase 0 - spikes (verify before building)
-- [ ] Logging build: measure the gap between game songs; confirm an in-game skip is
-      detectable (new song mid-slot); check whether the iPod has "previous".
-- [ ] Can rexglue's ImGui backend show our own textures (imgui 1.92
-      `ImGuiBackendFlags_RendererHasTextures` / `ImTextureData`)? If not, scope the SDK change.
-- [ ] Decode all 1380 iPod segments with vgmstream (+FFmpeg), join 30 per song, check
-      seams are click-free and lengths equal the SNR sample counts.
+### Phase 0 - spikes: DONE 2026-10-12 (results)
+- [x] **Covers in ImGui: supported, no SDK change.** rexglue sets
+      `ImGuiBackendFlags_RendererHasTextures` and services `ImTextureData` requests through
+      the ImmediateDrawer. Headless test at the pinned imgui (6d910d5): a 256x256 texture
+      registered with `ImGui::RegisterUserTexture` is created by the backend and drawn
+      from the 2nd frame (1st frame is ImGui's normal auto-size hidden frame). Notes:
+      API is in imgui_internal.h ("experimental"); before `WantDestroy` set
+      `UnusedFrames = 1` (backend waits for it; ImGui only counts it for atlases); after a
+      presenter change the backend marks textures `Destroyed` - set `WantCreate` again.
+- [x] **Originals decode exactly.** 1380/1380 segments decoded (vgmstream + FFmpeg, 35 s);
+      every segment length equals its SNR sample count. Total 2 h 25 min; FLAC ratio 0.62
+      measured (lossless round trip byte-exact) -> **~0.96 GB**.
+- [x] **Seams:** plain joins click at ~1/3 of joins (first decoded sample of each segment is
+      off - cold decoder start; the game itself likely plays this too - inference). A
+      32-sample LPC-extrapolated crossfade fixes it: joins above the local 99.9th-percentile
+      curvature 427 -> 8 of 1334, worst 9.3x -> 1.8x. Metric only, not listened to.
+      Script: `tests/seam_check.py`.
+- [x] **Song transitions (trace build 96d569c, logs skate3_004/005, script
+      `tests/trace_report.py`):**
+  - Gap between songs: 1-70 ms between last frame and next song's first frame (decoder
+    timing) - effectively none.
+  - Picking a song in the game's music player changes song immediately (left song 1 at
+    22 s of 109 s) -> mid-slot change = user action, easy to detect.
+  - No usable "previous": order was 42 -> 1 -> 29 (shuffle-like). Our playlist must own
+    previous/next.
+  - Pause menu: music keeps decoding, no song change.
+  - Original song (music off, song 17, 176 s) played all 30 segments to the end.
+  - With custom audio, slot 42 (195 s) holding a 160 s track (silence after 160 s) was left
+    at ~176 s, i.e. after ~16 s of silence, with no early exit in ipod.mpf. **Inference:
+    the game skips a song after a stretch of silence.** Consequences: never feed long
+    silence (radio mode always has audio); our Pause must not output silence for >10 s
+    (or must expect the game to change song - then just re-sync). Verify once in Phase 1.
+  - Every ~6 s segment is decoded on a fresh XMA context; resets arrive late, in batches.
+    The engine already handles this.
+- [x] **Hotkeys:** plain binds fire regardless of modifiers and the first matching bind wins,
+      so Ctrl+F7 / Ctrl+F8 collide with F7 (menu) and F8 (fingerprint log). Pick other keys
+      or register the chord binds before the plain ones.
+- **Phase 1 decision pending:** the in-game Rebuild cannot run vgmstream. Options: decode
+      originals once with the Python tool + vgmstream (simple), or decode in-process with the
+      runtime's FFmpeg XMA decoder (check what rexruntime.dll exports).
 
 ### Phase 1 - our playlist drives the music
 - [ ] Library: originals decoded once to FLAC; your tracks converted to FLAC.
@@ -57,7 +90,7 @@ Toolchain on the laptop: LLVM 23.1.3, CMake 4.4.4, Ninja, VS 2026 Build Tools, P
       budget 8000) so the game rarely changes song by itself.
 - [ ] Track change rules: our track ends -> next; game song changes mid-slot (skip) -> next.
 - [ ] F7 playlist editor: checkbox per entry (originals + yours), reorder, shuffle,
-      repeat; saved in the library. Prev / Next / Pause buttons; hotkeys Ctrl+F7 / Ctrl+F8.
+      repeat; saved in the library. Prev / Next / Pause buttons; hotkeys TBD (Ctrl+F7/F8 collide, see Phase 0).
 - [ ] Remove the per-slot assignment + length-fit table from the menu.
 
 ### Phase 2 - metadata
@@ -80,7 +113,7 @@ Toolchain on the laptop: LLVM 23.1.3, CMake 4.4.4, Ninja, VS 2026 Build Tools, P
 
 ## Needed from you
 - Free AcoustID API key (acoustid.org) - Phase 2, not needed for 0-1.
-- Confirm hotkeys Ctrl+F7 (previous) / Ctrl+F8 (next), or pick others.
+- Pick hotkeys for previous / next (Ctrl+F7/F8 collide with existing binds).
 - Optional: download with `yt-dlp --embed-metadata --embed-thumbnail -f bestaudio ...`
   so files carry tags and covers.
 

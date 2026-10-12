@@ -244,6 +244,8 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_app_common.cpp
     src/skate3_custom_music.cpp
     src/skate3_custom_music_glue.cpp
+    src/skate3_custom_music_library.cpp
+    src/skate3_custom_music_ui.cpp
     src/skate3_demo_path.cpp
     src/skate3_draw_distance.cpp
     src/skate3_fov.cpp
@@ -365,7 +367,7 @@ if(APPLE)
 endif()
 
 if(WIN32)
-    target_link_libraries(skate3 PRIVATE comdlg32 winhttp d3dcompiler gdiplus)
+    target_link_libraries(skate3 PRIVATE comdlg32 winhttp d3dcompiler gdiplus shell32 ole32 uuid)
 endif()
 
 add_custom_target(skate3_stage_runtime_library

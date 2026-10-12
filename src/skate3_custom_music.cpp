@@ -92,16 +92,44 @@ size_t Engine::num_assigned() const {
       std::count_if(slots_.begin(), slots_.end(), [](const auto& s) { return s != nullptr; }));
 }
 
-bool Engine::Load(const std::filesystem::path& dir, const LogFn& log) {
+size_t Engine::num_songs() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  loaded_.store(false, std::memory_order_release);
-  index_.clear();
-  song_samples_.clear();
-  slots_.clear();
-  contexts_.clear();
-  stats_ = {};
+  return song_samples_.size();
+}
+
+std::filesystem::path Engine::dir() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return dir_;
+}
+
+std::vector<uint32_t> Engine::song_samples() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return song_samples_;
+}
+
+std::vector<SlotInfo> Engine::Slots() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<SlotInfo> out(song_samples_.size());
+  for (size_t i = 0; i < out.size(); ++i) {
+    out[i].song = static_cast<uint32_t>(i);
+    out[i].song_seconds = song_samples_[i] / kSampleRate;
+    if (i < slots_.size() && slots_[i]) {
+      out[i].assigned = true;
+      out[i].title = slots_[i]->title;
+      out[i].track_seconds = static_cast<double>(slots_[i]->num_samples) / kSampleRate;
+    }
+  }
+  return out;
+}
+
+void Engine::SetGain(float gain) {
+  gain_.store(std::clamp(gain, 0.0f, 2.0f), std::memory_order_relaxed);
+}
+
+bool Engine::Load(const std::filesystem::path& dir, const LogFn& log) {
+  // Everything is parsed into locals first; the audio lock is taken only for the swap.
   auto fail = [&](const std::string& msg) {
-    if (log) log(LogLevel::kWarning, "custom music disabled: " + msg);
+    if (log) log(LogLevel::kWarning, "custom music: not loaded: " + msg);
     return false;
   };
 
@@ -127,12 +155,12 @@ bool Engine::Load(const std::filesystem::path& dir, const LogFn& log) {
   if (num_songs == 0 || num_songs > 4096 || num_entries > 50'000'000) {
     return fail("implausible index sizes");
   }
-  song_samples_.resize(num_songs);
-  for (auto& s : song_samples_) {
+  std::vector<uint32_t> song_samples(num_songs);
+  for (auto& s : song_samples) {
     if (!ReadLE(idx, &s)) return fail("truncated song table");
   }
-  index_.resize(num_entries);
-  for (auto& e : index_) {
+  std::vector<IndexEntry> index(num_entries);
+  for (auto& e : index) {
     uint32_t pos_bits = 0;
     if (!ReadLE(idx, &e.hash) || !ReadLE(idx, &e.song) || !ReadLE(idx, &pos_bits)) {
       return fail("truncated index entries");
@@ -140,7 +168,7 @@ bool Engine::Load(const std::filesystem::path& dir, const LogFn& log) {
     e.frame0_pos = static_cast<int32_t>(pos_bits);
     if (e.song >= num_songs) return fail("index entry references unknown song");
   }
-  if (!std::is_sorted(index_.begin(), index_.end(),
+  if (!std::is_sorted(index.begin(), index.end(),
                       [](const IndexEntry& a, const IndexEntry& b) { return a.hash < b.hash; })) {
     return fail("index not sorted");
   }
@@ -148,7 +176,7 @@ bool Engine::Load(const std::filesystem::path& dir, const LogFn& log) {
   // ---- manifest
   std::ifstream man(dir / "manifest.tsv");
   if (!man) return fail("cannot open manifest.tsv");
-  slots_.resize(num_songs);
+  std::vector<std::unique_ptr<Slot>> slots(num_songs);
   std::string line;
   bool header_ok = false;
   size_t line_no = 0, assigned = 0;
@@ -186,15 +214,25 @@ bool Engine::Load(const std::filesystem::path& dir, const LogFn& log) {
     if (static_cast<int64_t>(size / 4) < samples) {
       return fail("PCM file " + cols[1] + " shorter than manifest says");
     }
-    if (!slots_[song]) ++assigned;
-    slots_[song] = std::move(slot);
+    if (!slots[song]) ++assigned;
+    slots[song] = std::move(slot);
   }
   if (!header_ok) return fail("manifest is empty");
 
-  loaded_.store(true, std::memory_order_release);
+  {
+    // Old slots (and their open files) are destroyed after the swap, outside the lock.
+    std::lock_guard<std::mutex> lock(mutex_);
+    dir_ = dir;
+    index_.swap(index);
+    song_samples_.swap(song_samples);
+    slots_.swap(slots);
+    contexts_.clear();
+    last_song_ = -1;
+    loaded_.store(true, std::memory_order_release);
+  }
   if (log) {
     std::ostringstream msg;
-    msg << "custom music: loaded " << index_.size() << " fingerprints, " << assigned << "/"
+    msg << "custom music: loaded " << num_entries << " fingerprints, " << assigned << "/"
         << num_songs << " iPod songs replaced, from " << PathToUtf8(dir);
     log(LogLevel::kInfo, msg.str());
   }
@@ -248,7 +286,9 @@ bool Engine::ReadPcm(Slot& slot, int64_t pos, int16_t* out) {
 
 bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index,
                      uint32_t channels, uint8_t* pcm_be) {
-  if (!loaded() || !packet || !pcm_be || channels == 0 || channels > 2) return false;
+  if (!loaded() || !enabled() || !packet || !pcm_be || channels == 0 || channels > 2) {
+    return false;
+  }
   std::lock_guard<std::mutex> lock(mutex_);
   ++stats_.frames_seen;
 
@@ -278,11 +318,27 @@ bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index
   }
   st.next_pos = pos + kSamplesPerFrame;
 
+  // Now-playing: a different song, or the same song after a pause, counts as a new start.
+  const auto now = Clock::now();
+  if (st.song != last_song_ || now - last_time_ > std::chrono::seconds(3)) {
+    ++serial_;
+  }
+  last_song_ = st.song;
+  last_pos_ = pos;
+  last_time_ = now;
+
   Slot* slot = slots_[static_cast<size_t>(st.song)].get();
   if (!slot) return false;  // song kept as original game audio
 
   int16_t stereo[kSamplesPerFrame * 2];
   if (!ReadPcm(*slot, pos, stereo)) return false;
+
+  const float g = gain();
+  if (g != 1.0f) {
+    for (auto& v : stereo) {
+      v = static_cast<int16_t>(std::clamp(static_cast<int>(v * g), -32768, 32767));
+    }
+  }
 
   auto* out = reinterpret_cast<uint16_t*>(pcm_be);
   if (channels == 2) {
@@ -300,6 +356,26 @@ bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index
 void Engine::ResetContext(uint32_t context_id) {
   std::lock_guard<std::mutex> lock(mutex_);
   contexts_.erase(context_id);
+}
+
+NowPlaying Engine::GetNowPlaying(Clock::time_point now, Clock::duration window) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  NowPlaying np;
+  np.serial = serial_;
+  if (last_song_ < 0 || static_cast<size_t>(last_song_) >= song_samples_.size() ||
+      now - last_time_ > window) {
+    return np;
+  }
+  np.active = true;
+  np.song = static_cast<uint32_t>(last_song_);
+  np.position_seconds = std::max<int64_t>(0, last_pos_) / kSampleRate;
+  np.slot_seconds = song_samples_[np.song] / kSampleRate;
+  if (const Slot* slot = slots_[np.song].get(); slot && enabled()) {
+    np.replaced = true;
+    np.title = slot->title;
+    np.track_seconds = static_cast<double>(slot->num_samples) / kSampleRate;
+  }
+  return np;
 }
 
 Stats Engine::stats() const {

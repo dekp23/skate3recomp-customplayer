@@ -1,12 +1,12 @@
-// Skate 3 custom music: replaces in-game iPod songs with user audio at the XMA
+// Skate 3 custom music (dekp23): replaces in-game iPod songs with user audio at the XMA
 // decoder output. Game files are never modified.
 //
 // How it works
-//   tools/skate3_music_import (`prepare`) writes a folder containing:
+//   The library folder (see skate3_custom_music_library.h) contains:
 //     ipod.s3fp     fingerprints of every XMA packet in Ipod_Stream.mus, each mapped to
 //                   (song slot, sample position within that song)
-//     manifest.tsv  song slot -> user PCM file (44.1 kHz stereo s16le)
-//     NNN.pcm       converted user tracks
+//     manifest.tsv  song slot -> user PCM file (44.1 kHz stereo s16le) + title
+//     *.pcm         converted user tracks
 //   The runtime calls Engine::OnFrame for every decoded XMA frame. If the frame's source
 //   packet is an iPod packet, the 512 decoded samples are replaced with the user track at
 //   the same position. Everything else (SFX, other music) passes through untouched.
@@ -15,6 +15,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -30,6 +31,7 @@ constexpr uint32_t kFingerprintSkip = 4;    // skip XMA packet header
 constexpr uint32_t kFingerprintLength = 256;
 constexpr uint32_t kSamplesPerFrame = 512;  // per channel, matches XmaContext
 constexpr uint32_t kIndexVersion = 3;
+constexpr double kSampleRate = 44100.0;
 
 // UTF-8 <-> path conversion that works in C++17 and C++20+ (char8_t).
 std::string PathToUtf8(const std::filesystem::path& p);
@@ -46,22 +48,53 @@ struct Stats {
   uint64_t resyncs = 0;            // position discontinuities (song change, seek, segment trim)
 };
 
+struct SlotInfo {
+  uint32_t song = 0;
+  double song_seconds = 0;   // length of the in-game song this slot replaces
+  bool assigned = false;
+  std::string title;         // user track title (empty if not assigned)
+  double track_seconds = 0;  // user track length
+};
+
+struct NowPlaying {
+  bool active = false;        // an iPod song was decoded within the recent window
+  bool replaced = false;      // ... and it is playing user audio
+  uint32_t song = 0;
+  std::string title;
+  double position_seconds = 0;
+  double track_seconds = 0;   // user track length (0 if not replaced)
+  double slot_seconds = 0;    // in-game slot length
+  uint64_t serial = 0;        // increments every time a different song starts
+};
+
 enum class LogLevel { kInfo, kWarning, kError };
 using LogFn = std::function<void(LogLevel, const std::string&)>;
 
 class Engine {
  public:
+  using Clock = std::chrono::steady_clock;
+
   Engine();
   ~Engine();
   Engine(const Engine&) = delete;
   Engine& operator=(const Engine&) = delete;
 
-  // Loads <dir>/ipod.s3fp and <dir>/manifest.tsv. Returns false (and logs why) if the
-  // folder is missing or invalid; the engine then stays inert.
+  // Loads <dir>/ipod.s3fp and <dir>/manifest.tsv. File work happens outside the audio
+  // lock; the new state is swapped in atomically, so this is safe while music plays.
+  // On failure the previous state (if any) is kept and false is returned.
   bool Load(const std::filesystem::path& dir, const LogFn& log);
   bool loaded() const { return loaded_.load(std::memory_order_acquire); }
-  size_t num_songs() const { return song_samples_.size(); }
+  std::filesystem::path dir() const;
+  size_t num_songs() const;
   size_t num_assigned() const;
+  std::vector<uint32_t> song_samples() const;
+  std::vector<SlotInfo> Slots() const;
+
+  // Runtime controls (thread-safe).
+  void SetEnabled(bool enabled) { enabled_.store(enabled, std::memory_order_relaxed); }
+  bool enabled() const { return enabled_.load(std::memory_order_relaxed); }
+  void SetGain(float gain);  // linear, clamped to [0, 2]
+  float gain() const { return gain_.load(std::memory_order_relaxed); }
 
   // Called once per decoded XMA frame, before the frame reaches guest memory.
   //   context_id   XMA context number
@@ -75,6 +108,10 @@ class Engine {
 
   // Forget per-context position state (e.g. when the game resets a context).
   void ResetContext(uint32_t context_id);
+
+  // What the iPod is playing, based on frames decoded within `window` before `now`.
+  NowPlaying GetNowPlaying(Clock::time_point now,
+                           Clock::duration window = std::chrono::milliseconds(1500)) const;
 
   Stats stats() const;
 
@@ -95,15 +132,23 @@ class Engine {
   bool ReadPcm(Slot& slot, int64_t pos, int16_t* out_stereo);
 
   std::atomic<bool> loaded_{false};
+  std::atomic<bool> enabled_{true};
+  std::atomic<float> gain_{1.0f};
+  std::filesystem::path dir_;
   std::vector<IndexEntry> index_;
   std::vector<uint32_t> song_samples_;
   std::vector<std::unique_ptr<Slot>> slots_;  // by song index; null = not assigned
   std::unordered_map<uint32_t, ContextState> contexts_;
   Stats stats_;
+  // Now-playing tracking.
+  int32_t last_song_ = -1;
+  int64_t last_pos_ = 0;
+  Clock::time_point last_time_{};
+  uint64_t serial_ = 0;
   mutable std::mutex mutex_;
 };
 
-// Process-wide instance used by the XMA frame filter.
+// Process-wide instance used by the XMA frame filter and the UI.
 Engine& GlobalEngine();
 
 }  // namespace skate3::custom_music

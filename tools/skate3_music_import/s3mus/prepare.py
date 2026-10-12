@@ -92,12 +92,22 @@ def assign(songs: Sequence[Song], tracks: Sequence[Track], fill: str = "repeat")
     return [Assignment(s.index, out.get(s.index)) for s in songs]
 
 
+def clean_title(path: Path) -> str:
+    """File stem without a trailing yt-dlp " [videoid]" tag (matches the C++ CleanTitle)."""
+    t = path.stem
+    if len(t) >= 14 and t.endswith("]") and t[-13] == "[" and t[-14] == " ":
+        vid = t[-12:-1]
+        if all(c.isalnum() or c in "-_" for c in vid):
+            t = t[:-14]
+    return t.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
 def write_manifest(out_dir: Path, assignments: Sequence[Assignment]) -> None:
     lines = ["# skate3recomp custom music manifest", "s3music\t1"]
     for a in assignments:
         if a.track is None:
             continue
-        title = a.track.source.stem.replace("\t", " ")
+        title = clean_title(a.track.source)
         lines.append(f"{a.song}\t{a.track.pcm_name}\t{a.track.num_samples}\t{title}")
     (out_dir / MANIFEST).write_text("\n".join(lines) + "\n", encoding="utf-8")
 

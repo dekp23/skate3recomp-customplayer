@@ -1,8 +1,10 @@
 #include "skate3_custom_music_glue.h"
 
 #include "skate3_custom_music.h"
+#include "skate3_custom_music_ui.h"
 
 #include <atomic>
+#include <mutex>
 #include <string>
 
 #include <rex/audio/xma/frame_filter.h>
@@ -39,27 +41,34 @@ void OnContextReset(void*, uint32_t context_id) { GlobalEngine().ResetContext(co
 
 }  // namespace
 
+std::filesystem::path ResolveLibraryDir(const std::filesystem::path& game_data_root) {
+  // Lookup order: explicit cvar, then "custom_music" next to the executable (portable,
+  // independent of settings.toml, which the settings menu rewrites with its own keys
+  // only), then the game data folder.
+  const std::string configured = REXCVAR_GET(skate3_custom_music_dir);
+  if (!configured.empty()) return PathFromUtf8(configured);
+  std::error_code ec;
+  const auto beside_exe = rex::filesystem::GetAppRootFolder() / "custom_music";
+  if (std::filesystem::is_directory(beside_exe, ec)) return beside_exe;
+  const auto in_game = game_data_root / "data" / "audio" / "music" / "custom";
+  if (std::filesystem::is_directory(in_game, ec)) return in_game;
+  return beside_exe;  // where the in-game menu will create one
+}
+
 void Install(const std::filesystem::path& game_data_root) {
   if (!REXCVAR_GET(skate3_custom_music)) {
     REXLOG_INFO("custom music: disabled by skate3_custom_music=false");
     return;
   }
-  // Lookup order: explicit cvar, then "custom_music" next to the executable (portable,
-  // independent of settings.toml, which the settings menu rewrites with its own keys
-  // only), then the game data folder.
-  std::filesystem::path dir;
-  const std::string configured = REXCVAR_GET(skate3_custom_music_dir);
-  std::error_code ec;
-  const auto beside_exe = rex::filesystem::GetAppRootFolder() / "custom_music";
-  if (!configured.empty()) {
-    dir = PathFromUtf8(configured);
-  } else if (std::filesystem::is_directory(beside_exe, ec)) {
-    dir = beside_exe;
-  } else {
-    dir = game_data_root / "data" / "audio" / "music" / "custom";
+  const auto dir = ResolveLibraryDir(game_data_root);
+  const auto settings = PlayerSettings::Load(dir);
+  {
+    std::lock_guard<std::mutex> lock(GlobalUiState().mutex);
+    GlobalUiState().library_dir = dir;
+    GlobalUiState().settings = settings;
   }
-
-  const bool ok = GlobalEngine().Load(dir, [](LogLevel level, const std::string& msg) {
+  settings.ApplyTo(GlobalEngine());
+  GlobalEngine().Load(dir, [](LogLevel level, const std::string& msg) {
     switch (level) {
       case LogLevel::kInfo:
         REXLOG_INFO("{}", msg);
@@ -72,8 +81,9 @@ void Install(const std::filesystem::path& game_data_root) {
         break;
     }
   });
-  if (!ok) return;
+  REXLOG_INFO("custom music (dekp23): library {}, F7 opens the music menu", PathToUtf8(dir));
 
+  // Installed even without a loaded library: the F7 menu can build/load one later.
   rex::audio::XmaFrameFilter filter;
   filter.on_frame = &OnFrame;
   filter.on_context_reset = &OnContextReset;

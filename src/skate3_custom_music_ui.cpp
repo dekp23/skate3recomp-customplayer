@@ -1,5 +1,6 @@
 #include "skate3_custom_music_ui.h"
 
+#include "skate3_custom_music_glue.h"
 #include "skate3_custom_music_library.h"
 #include "skate3_custom_music_player.h"
 
@@ -287,7 +288,8 @@ void CustomMusicMenu::RunJob(Job job) {
   }
 
   library::Options opt;
-  opt.ffmpeg = library::FindFfmpeg({});
+  opt.converter = MakeInGameConverter();
+  opt.ffmpeg = library::FindFfmpeg({});  // optional fallback
   opt.game_music_dir = game_music;
   const auto result = library::Rebuild(
       dir, opt,

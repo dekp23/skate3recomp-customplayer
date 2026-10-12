@@ -276,8 +276,55 @@ static void TestFlexible(const fs::path& index, const fs::path& game_music, cons
         "tracks.tsv lists the converted tracks");
 }
 
+// In-process converter path (as the game uses): tags/cover sidecars and tracks.tsv columns.
+static void TestConverter(const fs::path& work, const fs::path& index) {
+  fs::remove_all(work);
+  fs::create_directories(work / "tracks");
+  fs::copy_file(index, work / "ipod.s3fp");
+  std::ofstream(work / "tracks" / "a.webm") << "x";
+  std::ofstream(work / "tracks" / "b.mp3") << "y";
+  std::ofstream(work / "tracks" / "broken.m4a") << "z";
+  library::Options opt;
+  int calls = 0;
+  opt.converter = [&](const fs::path& src, const fs::path& dst, library::TrackTags* tags,
+                      std::string* err) -> int64_t {
+    ++calls;
+    if (src.extension() == ".m4a") {
+      *err = "unsupported";
+      return -1;
+    }
+    std::ofstream(dst, std::ios::binary) << std::string(44100 * 4, '\0');
+    if (src.stem() == "a") {
+      tags->title = "Real Title";
+      tags->artist = "Real Artist";
+      tags->album = "LP";
+      tags->cover = {0xFF, 0xD8, 0xFF};
+    }
+    return 44100;
+  };
+  auto r = library::Rebuild(work, opt, nullptr, nullptr);
+  CHECK(r.ok && r.converted == 2 && r.failed == 1 && calls == 3, "converter used for every track");
+  std::ifstream tt(work / "tracks.tsv");
+  std::string all((std::istreambuf_iterator<char>(tt)), {});
+  CHECK(all.find("Real Title\ta.webm\tReal Artist\tLP") != std::string::npos, "tags in tracks.tsv");
+  CHECK(all.find("\tb\tb.mp3\t\t") != std::string::npos, "file name title when no tags");
+  size_t covers = 0, tagfiles = 0;
+  for (auto& e : fs::directory_iterator(work)) {
+    covers += e.path().extension() == ".cover";
+    tagfiles += e.path().extension() == ".tags";
+  }
+  CHECK(covers == 1 && tagfiles == 2, "sidecars written");
+  auto r2 = library::Rebuild(work, opt, nullptr, nullptr);
+  std::ifstream tt2(work / "tracks.tsv");
+  std::string all2((std::istreambuf_iterator<char>(tt2)), {});
+  CHECK(r2.reused == 2 && all2.find("Real Artist") != std::string::npos, "cached tracks keep their tags");
+  CHECK(library::RemoveUnusedPcm(work) == 0, "sidecars of used tracks are kept");
+  std::cout << "converter: ok\n";
+}
+
 int main(int argc, char** argv) {
   TestCleanTitle();
+  if (argc >= 4) TestConverter(fs::path(argv[2]).concat("_conv"), argv[3]);
   if (argc >= 2) TestAssignMatchesPython(argv[1]);
   if (argc >= 4) TestRebuildAndReload(argv[2], argv[3]);
   if (argc >= 6) TestNowPlayingAndGain(argv[4], argv[5]);

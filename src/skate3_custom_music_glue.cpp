@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 
+#include <rex/audio/audio_file_decoder.h>
 #include <rex/audio/xma/frame_filter.h>
 #include <rex/audio/xma/stream_decoder.h>
 #include <rex/cvar.h>
@@ -264,6 +265,48 @@ Player::OriginalDecoder MakeOriginalDecoder(const std::filesystem::path& game_mu
 }
 
 }  // namespace
+
+library::Converter MakeInGameConverter() {
+  return [](const std::filesystem::path& src, const std::filesystem::path& dst,
+            library::TrackTags* tags, std::string* error) -> int64_t {
+    namespace fs = std::filesystem;
+    rex::audio::DecodedAudioFile d;
+    if (!rex::audio::DecodeAudioFile(PathToUtf8(src), &d)) {
+      if (error) *error = d.error;
+      return -1;
+    }
+    const fs::path tmp = fs::path(dst).concat(".tmp");
+    {
+      std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+      std::vector<uint8_t> le(d.pcm.size() * 2);
+      for (size_t i = 0; i < d.pcm.size(); ++i) {
+        const auto v = static_cast<uint16_t>(d.pcm[i]);
+        le[2 * i] = static_cast<uint8_t>(v & 0xFF);
+        le[2 * i + 1] = static_cast<uint8_t>(v >> 8);
+      }
+      out.write(reinterpret_cast<const char*>(le.data()), static_cast<std::streamsize>(le.size()));
+      if (!out) {
+        if (error) *error = "cannot write " + PathToUtf8(tmp);
+        return -1;
+      }
+    }
+    std::error_code ec;
+    fs::rename(tmp, dst, ec);
+    if (ec) {
+      if (error) *error = ec.message();
+      return -1;
+    }
+    if (tags) {
+      tags->title = d.title;
+      tags->artist = d.artist;
+      tags->album = d.album;
+      tags->cover = std::move(d.cover);
+    }
+    REXLOG_INFO("custom music: converted {} ({}, {:.0f} s)", PathToUtf8(src.filename()), d.codec,
+                d.pcm.size() / 2 / 44100.0);
+    return static_cast<int64_t>(d.pcm.size() / 2);
+  };
+}
 
 std::filesystem::path Install(const std::filesystem::path& game_data_root) {
   if (!REXCVAR_GET(skate3_custom_music)) {

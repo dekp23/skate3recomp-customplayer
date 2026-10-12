@@ -46,6 +46,18 @@ uint64_t Fnv1a(const std::string& s) {
   return h;
 }
 
+std::vector<std::string> SplitTabs(const std::string& line) {
+  std::vector<std::string> out(1);
+  for (char c : line) {
+    if (c == '\t') {
+      out.emplace_back();
+    } else if (c != '\r') {
+      out.back().push_back(c);
+    }
+  }
+  return out;
+}
+
 std::string CacheName(const fs::path& src) {
   std::error_code ec;
   const auto size = fs::file_size(src, ec);
@@ -565,8 +577,8 @@ BuildResult Rebuild(const fs::path& library_dir, const Options& options,
     r.message = "ipod.s3fp invalid";
     return r;
   }
-  if (options.ffmpeg.empty()) {
-    r.message = "ffmpeg not found (install with: winget install Gyan.FFmpeg)";
+  if (!options.converter && options.ffmpeg.empty()) {
+    r.message = "no audio converter available";
     return r;
   }
   const auto sources = ScanFolder(library_dir / kTracksDirName);
@@ -579,7 +591,7 @@ BuildResult Rebuild(const fs::path& library_dir, const Options& options,
   struct Built {
     std::string pcm, title;
     int64_t samples;
-    std::string source;
+    std::string source, artist, album;
   };
   std::vector<Built> built;
   for (size_t i = 0; i < sources.size(); ++i) {
@@ -595,20 +607,49 @@ BuildResult Rebuild(const fs::path& library_dir, const Options& options,
     std::error_code ec;
     const auto size = fs::file_size(pcm, ec);
     int64_t samples = -1;
+    TrackTags tags;
+    const fs::path tags_file = fs::path(pcm).concat(".tags");
     if (!ec && size >= 4 && size % 4 == 0) {
       samples = static_cast<int64_t>(size / 4);
       ++r.reused;
+      std::ifstream tf(tags_file);
+      std::string line;
+      if (std::getline(tf, line)) {
+        const auto f = SplitTabs(line);
+        if (f.size() >= 3) tags.title = f[0], tags.artist = f[1], tags.album = f[2];
+      }
     } else {
       std::string err;
-      samples = ConvertToPcm(options.ffmpeg, src, pcm, &err);
+      if (options.converter) samples = options.converter(src, pcm, &tags, &err);
+      if (samples < 0 && !options.ffmpeg.empty()) {
+        // Fallback for formats the built-in decoders do not cover: an installed ffmpeg.
+        std::string err2;
+        samples = ConvertToPcm(options.ffmpeg, src, pcm, &err2);
+        if (samples < 0 && err.empty()) err = err2;
+      }
       if (samples < 0) {
         ++r.failed;
         r.errors.push_back(title + ": " + err);
         continue;
       }
       ++r.converted;
+      // Sidecars: tags (title<TAB>artist<TAB>album) and the embedded cover, if any.
+      auto clean = [](std::string v) {
+        for (char& c : v) {
+          if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+        }
+        return v;
+      };
+      std::ofstream(tags_file, std::ios::trunc)
+          << clean(tags.title) << '\t' << clean(tags.artist) << '\t' << clean(tags.album) << '\n';
+      if (!tags.cover.empty()) {
+        std::ofstream cf(fs::path(pcm).concat(".cover"), std::ios::binary | std::ios::trunc);
+        cf.write(reinterpret_cast<const char*>(tags.cover.data()),
+                 static_cast<std::streamsize>(tags.cover.size()));
+      }
     }
-    built.push_back({name, title, samples, PathToUtf8(src.filename())});
+    built.push_back({name, tags.title.empty() ? title : tags.title, samples,
+                     PathToUtf8(src.filename()), tags.artist, tags.album});
   }
   if (progress) progress(sources.size(), sources.size(), "");
   if (built.empty()) {
@@ -625,11 +666,11 @@ BuildResult Rebuild(const fs::path& library_dir, const Options& options,
     const fs::path ttmp = library_dir / "tracks.tsv.tmp";
     {
       std::ofstream out(ttmp, std::ios::binary | std::ios::trunc);
-      out << "# dekp23 custom music tracks: pcm<TAB>samples<TAB>title<TAB>source\n"
+      out << "# dekp23 custom music tracks: pcm<TAB>samples<TAB>title<TAB>source<TAB>artist<TAB>album\n"
           << "s3tracks\t1\n";
       for (size_t i = 0; i < built.size(); ++i) {
         out << built[i].pcm << '\t' << built[i].samples << '\t' << built[i].title << '\t'
-            << built[i].source << '\n';
+            << built[i].source << '\t' << built[i].artist << '\t' << built[i].album << '\n';
       }
       if (!out) {
         r.message = "could not write tracks.tsv";
@@ -739,8 +780,15 @@ size_t RemoveUnusedPcm(const fs::path& library_dir) {
   size_t removed = 0;
   std::error_code ec;
   for (const auto& e : fs::directory_iterator(library_dir, ec)) {
-    if (Lower(e.path().extension().string()) != ".pcm") continue;
-    if (used.count(PathToUtf8(e.path().filename()))) continue;
+    const std::string ext = Lower(e.path().extension().string());
+    std::string base = PathToUtf8(e.path().filename());
+    if (ext == ".tags" || ext == ".cover") {
+      base = PathToUtf8(e.path().stem());  // "<name>.pcm"
+      if (Lower(fs::path(base).extension().string()) != ".pcm") continue;
+    } else if (ext != ".pcm") {
+      continue;
+    }
+    if (used.count(base)) continue;
     if (fs::remove(e.path(), ec)) ++removed;
   }
   return removed;

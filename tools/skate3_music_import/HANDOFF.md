@@ -102,8 +102,12 @@ Toolchain on the laptop: LLVM 23.1.3, CMake 4.4.4, Ninja, VS 2026 Build Tools, P
 - [ ] In-game test: build 373ae46 (+SDK 5df62be). Check: decoder self-test line, "long
       iPod slots active", music plays from the playlist, Next/Prev, in-game song pick ->
       next entry, toast titles.
-- [ ] Your tracks still need ffmpeg for conversion (decision pending: auto-download a
-      static ffmpeg on first use vs. building more decoders into the runtime).
+- [x] Your tracks convert in-game (user chose: extend the runtime's FFmpeg). SDK ac48976:
+      libavformat + libswresample + aac/opus/vorbis/flac/alac/pcm/mp2/wmav1 decoders and
+      matroska/mov/ogg/flac/wav/aiff/aac/w64 demuxers via an overlay config (FFmpeg
+      submodule untouched). `rex::audio::DecodeAudioFile` also returns tags + cover;
+      sidecars `<pcm>.tags` / `<pcm>.cover`, tracks.tsv has artist/album columns.
+      Installed ffmpeg = fallback only.
 - [ ] Pause: not offered (game appears to skip a song after ~16 s of silence).
 - [ ] Hotkeys for previous/next: Ctrl+F7/F8 collide; pick others.
 

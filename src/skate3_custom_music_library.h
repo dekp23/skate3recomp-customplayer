@@ -31,7 +31,19 @@ constexpr const char* kTracksDirName = "tracks";
 bool EnsureIndex(const std::filesystem::path& library_dir,
                  const std::filesystem::path& game_music_dir, std::string* message);
 
+// Tags and cover read while converting a track.
+struct TrackTags {
+  std::string title, artist, album;
+  std::vector<uint8_t> cover;  // embedded picture as stored (JPEG/PNG)
+};
+// Converts src into 44.1 kHz stereo s16le at dst_pcm; returns sample frames or -1.
+using Converter = std::function<int64_t(const std::filesystem::path& src,
+                                        const std::filesystem::path& dst_pcm, TrackTags* tags,
+                                        std::string* error)>;
+
 struct Options {
+  // In-process converter (the runtime's FFmpeg). If empty, an installed ffmpeg is used.
+  Converter converter;
   std::filesystem::path ffmpeg;
   bool fill_repeat = true;  // reuse tracks for leftover slots; false keeps the game's songs
   // Song-length fitting: the original game music folder (read only, for ipod.mpf). When

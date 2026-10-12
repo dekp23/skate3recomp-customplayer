@@ -3,6 +3,8 @@
 
 #include <filesystem>
 
+#include "skate3_custom_music_library.h"
+
 namespace skate3::custom_music {
 
 // Loads the custom music folder (cvar skate3_custom_music_dir, default
@@ -14,6 +16,9 @@ std::filesystem::path Install(const std::filesystem::path& game_data_root);
 
 // Guest path the music overlay replaces.
 constexpr const char* kGuestMusicPath = "\\Device\\Harddisk0\\Partition1\\data\\audio\\music";
+
+// Converts a music file with the runtime's bundled FFmpeg (no external tools).
+library::Converter MakeInGameConverter();
 
 // Removes the filter and logs usage statistics.
 void Uninstall();

@@ -8,8 +8,8 @@ Two parts:
 - **This Python tool** (Python 3.8+, no packages; `ffmpeg` for `prepare`): inspects the
   game's music files, fingerprints every iPod XMA packet, converts your music and
   assigns it to the 46 in-game song slots.
-- **Runtime** (`src/skate3_custom_music*.cpp` + a frame-filter hook in the rexglue SDK
-  fork): for each decoded XMA frame whose packet is an iPod packet, writes your PCM at
+- **Runtime** (`src/skate3_custom_music*.cpp` + the rexglue SDK fork: frame-filter hook,
+  XMA stream decoder, music file decoder): for each decoded XMA frame whose packet is an iPod packet, writes your PCM at
   the exact song position instead. SFX, menu and world music pass through.
 
 ## Using it
@@ -22,8 +22,11 @@ Two parts:
      play, reorder with the arrows, **Play** any entry, **Shuffle**, **Previous / Next**.
      Saved in `<library>\playlist.tsv`.
    - **Add tracks...** / **Import Music folder** copy audio into `<library>\tracks` and
-     convert it in the background (needs ffmpeg for now: `winget install Gyan.FFmpeg`);
-     **Rescan tracks** re-reads that folder.
+     convert it in the background with the game's own built-in FFmpeg (mp3, m4a/aac/alac,
+     webm/mkv/opus, ogg, flac, wav, aiff, wma, and the audio of mp4 videos; nothing to
+     install). Title/artist/album and cover art are read from the file's tags.
+     **Rescan tracks** re-reads that folder. (An installed ffmpeg is used only as a
+     fallback for anything else.)
    - **Use my music** (off = the game's normal soundtrack), **Pop-ups**, **Volume**
      (`<library>\player.ini`).
 4. Picking a song in the game's own music player skips to the next playlist entry.

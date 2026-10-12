@@ -421,6 +421,8 @@ std::vector<PlaylistEntry> LoadPlaylist(const fs::path& library_dir,
       e.pcm = library_dir / PathFromUtf8(f[0]);
       e.samples = std::atoll(f[1].c_str());
       e.title = f[2];
+      if (f.size() > 4) e.artist = f[4];
+      if (f.size() > 5) e.album = f[5];
       if (e.samples > 0) all.push_back(e);
     }
   }

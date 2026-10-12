@@ -14,48 +14,44 @@ Two parts:
 
 ## Using it
 
-1. Build this fork of skate3recomp (see the repo README, "Building from Source"). The
-   submodule `third_party/rexglue-sdk` points at the fork with the hook
-   (`dekp23/rexglue-skate3-customplayer`, branch `custom-music-hook`):
-   `git submodule sync --recursive && git submodule update --init --recursive`.
-2. Install ffmpeg (Windows: `winget install Gyan.FFmpeg`), then from this folder:
-   ```
-   py skate3_music_import.py backup  "C:\...\game\data\audio\music"
-   py skate3_music_import.py prepare "C:\...\game\data\audio\music" "C:\path\to\my music"
-   ```
-   This writes `...\music\custom\` (index, manifest, converted PCM; ~10 MB per minute)
-   and prints which track went to which slot. Re-run any time your music changes.
-3. Start the game. The log should show
-   `custom music: loaded 93588 fingerprints, N/46 iPod songs replaced`, then on first
-   iPod playback `custom music: first iPod frame replaced`. Shutdown logs statistics.
+1. Build this fork (see the repo README, or `windows/run_build.cmd`, which does it all).
+2. Once: `py skate3_music_import.py prepare "<game>\data\audio\music" "<some music>"`
+   (or `windows/run_prepare_music.cmd`). This creates the library, including the
+   fingerprint index `ipod.s3fp`, which the game cannot build itself.
+3. In game, press **F7** (dekp23 Custom Music):
+   - **Import Music folder** / **Add tracks...** copy audio into `<library>\tracks` and
+     rebuild; **Rebuild library** re-scans that folder. Conversion uses ffmpeg
+     (`winget install Gyan.FFmpeg`) and runs in the background.
+   - **Use my music**, **Volume**, **Now-playing pop-ups**, **Leftover slots**
+     (repeat your tracks or keep game songs). Saved in `<library>\player.ini`.
+   - The slot table shows which track plays in which iPod slot and how it fits.
+4. **Song lengths** are fitted to your tracks: each slot is lengthened or shortened so
+   it ends within one segment (3.6-12.3 s) of your track. The game reads song lengths
+   at startup, so after a rebuild the menu asks you to **restart Skate 3**.
+5. When one of your tracks starts, a **NOW PLAYING** pop-up shows its title (bottom left).
 
-Options: `--fill original` keeps the game's song for unused slots (default `repeat`
-reuses your tracks); `--gain-db -3` adjusts level.
+Library folder: `custom_music` next to `skate3.exe` (cvar `skate3_custom_music_dir`
+overrides; settings.toml is not used for it because the settings menu rewrites that file).
 
-Folder lookup at startup: cvar `skate3_custom_music_dir` (e.g. `--skate3_custom_music_dir=...`
-on the command line), else **`custom_music` next to `skate3.exe`**, else
-`<game>\data\audio\music\custom`. Don't rely on `settings.toml` for the folder: the
-settings menu rewrites that file with its own keys only. `skate3_custom_music=false`
-disables the feature.
+### How song lengths work (no game file is modified)
 
-### One-click Windows scripts (`windows/`)
+`ipod.mpf` links each song's 30 audio segments into a chain. The rebuild writes
+`<library>\ipod_layout.mpf`, in which a slot's chain replays the song's own segments
+(longer) or ends early (shorter); audio is replaced at runtime anyway, so the carrier
+content does not matter. Only nodes are appended, so existing node numbers stay valid.
+At startup the runtime builds `<library>\game_music` (hard links to the game's music
+files plus the layout as `ipod.mpf`) and mounts it over `data\audio\music` through the
+recomp's virtual file system. Requires the library and the game on the same drive
+(hard links); otherwise song lengths stay original.
 
-Put the folder next to an existing Skate3Recomp install (e.g. `...\Skate3Recomp-Windows\custom_music_build`):
-`run_build.cmd` installs missing tools with winget, clones this fork into `C:\s3build`,
-downloads TU3, builds, and assembles `C:\s3build\Skate3Recomp-CustomMusic` (game folder linked,
-saves copied, `custom_music` linked to `C:\s3build\custom_music`). `run_prepare_music.cmd`
-converts everything in your Windows Music folder into `C:\s3build\custom_music`.
+### Limitations
 
-### Current limitations (honest list)
-
-- **Song length is fixed by the game slot.** A track plays for exactly as long as the
-  in-game song it replaces (109–369 s). Shorter tracks end in silence until the slot
-  ends; longer ones are cut. `prepare` best-fits lengths and reports both cases.
-- Track titles shown in-game are still the original artists/titles.
-- Only the default XMA decoder path is hooked (`xma_use_old_decoder = true`, the default).
-- **Not yet confirmed in-game.** Everything below "Verification" is offline. The key
-  assumption is that the game plays iPod music through hardware XMA contexts; the log
-  lines above confirm or refute it on first run.
+- The in-game music player still shows the original titles/artists; the pop-up shows
+  yours. Replacing the game's own text needs the title strings, which are in EA's
+  compressed archives (not yet decoded).
+- Only the default XMA decoder path is hooked (`xma_use_old_decoder = true`).
+- `prepare` (Python) assigns tracks to the original slot lengths; the in-game Rebuild
+  is what fits lengths.
 
 ## Inspection commands
 
@@ -94,9 +90,10 @@ Measured on the real v2.0.2 install (2026-10-11):
 | `game.mpf` + `Game_Stream.mus` (28,052,480 B) | v5.3 | big | 1 | 1074 | EA-XMA 44.1 kHz stereo | PASS |
 | `world.mpf` | v5.3 | big | 1 | 5725 | MUS not checked | — |
 
-- iPod: 1380 segments = **46 runs of 30 equal-length segments**. Inference (not yet
-  cross-checked against the MPF node graph): 46 songs, each cut into 30 parts;
-  lengths 109–369 s, total 145.2 min.
+- iPod: 1380 segments = 46 songs x 30 equal-length segments, **confirmed by the MPF
+  node graph**: section 1 holds one chain per song (entry node -> 30 segment nodes, wave =
+  sample index + 1 -> end node); section 2 holds a short version of each song (last 11
+  segments). Named variables: `ipodsection`, `ipod`, `replay`. Lengths 109-369 s.
 - One trimmed XMA packet per SNS block (< 2048 bytes; the game pads it for hardware).
   93,589 packets; block samples sum exactly to each SNR sample count.
 - Every segment: first packet decodes 384 samples more than it declares (decoder
@@ -126,12 +123,10 @@ python3 tools/skate3_music_import/tests/sim_stream.py MUSIC/ipod.mpf MUSIC/game.
 
 ## Roadmap
 
-1. *(done)* Inspector/validator; codec identified; runtime replacement engine + hook.
-2. **Next: first in-game test** on Windows; read the log lines above.
-3. Decode the MPF node graph: confirm song boundaries, find title strings, map in-game
-   "next track" behaviour.
-4. Remove the slot-length limit: build longer "carrier" songs by reusing existing XMA
-   packets in a rewritten `.mus`/`.mpf` (no encoder needed, since the runtime replaces
-   the audio anyway).
+1. *(done)* Inspector/validator; runtime replacement engine + hook; confirmed in game.
+2. *(done)* Now-playing pop-up, F7 menu, in-game library rebuild.
+3. *(done, needs in-game confirmation)* Song lengths fitted via the MPF node graph.
+4. Replace titles in the game's own music player (decode EA "EB" archives or hook the
+   text lookup).
 
 Legal: use only your own game copy; don't distribute game files or copyrighted music.

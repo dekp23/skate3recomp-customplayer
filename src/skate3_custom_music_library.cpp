@@ -231,56 +231,6 @@ int64_t ConvertToPcm(const fs::path& ffmpeg, const fs::path& src, const fs::path
   return static_cast<int64_t>(size / 4);
 }
 
-std::vector<int> Assign(const std::vector<uint32_t>& song_samples,
-                        const std::vector<int64_t>& track_samples, bool fill_repeat) {
-  std::vector<int> out(song_samples.size(), -1);
-  std::map<size_t, int64_t> free;  // slot -> length
-  for (size_t i = 0; i < song_samples.size(); ++i) free[i] = song_samples[i];
-
-  std::vector<int> order(track_samples.size());
-  for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int>(i);
-  std::stable_sort(order.begin(), order.end(),
-                   [&](int a, int b) { return track_samples[a] > track_samples[b]; });
-
-  // Python: min((n, i)) over fitting slots, else max((n, i)) over all free slots.
-  for (int t : order) {
-    if (free.empty()) break;
-    bool have = false;
-    std::pair<int64_t, size_t> best{};
-    for (const auto& [slot, len] : free) {
-      if (len >= track_samples[t]) {
-        const std::pair<int64_t, size_t> key{len, slot};
-        if (!have || key < best) best = key, have = true;
-      }
-    }
-    if (!have) {
-      for (const auto& [slot, len] : free) {
-        const std::pair<int64_t, size_t> key{len, slot};
-        if (!have || key > best) best = key, have = true;
-      }
-    }
-    out[best.second] = t;
-    free.erase(best.second);
-  }
-  if (fill_repeat && !order.empty()) {
-    while (!free.empty()) {
-      std::pair<int64_t, size_t> slot_key{-1, 0};
-      for (const auto& [slot, len] : free) slot_key = std::max(slot_key, std::make_pair(len, slot));
-      // Python: max(fits, key=samples) -> first maximal in `ordered` order; else ordered[0].
-      int pick = -1;
-      for (int t : order) {
-        if (track_samples[t] <= slot_key.first &&
-            (pick < 0 || track_samples[t] > track_samples[pick])) {
-          pick = t;
-        }
-      }
-      out[slot_key.second] = pick >= 0 ? pick : order[0];
-      free.erase(slot_key.second);
-    }
-  }
-  return out;
-}
-
 std::vector<uint16_t> ChainOfLength(size_t segments, size_t n) {
   std::vector<uint16_t> chain;
   if (segments == 0 || n == 0) return chain;
@@ -297,90 +247,6 @@ std::vector<uint16_t> ChainOfLength(size_t segments, size_t n) {
   return chain;
 }
 
-namespace {
-struct Fit {
-  size_t n = 0;          // segments
-  int64_t length = 0;    // slot length with n segments
-};
-Fit FitTrack(const std::vector<uint32_t>& segs, int64_t track, size_t max_n) {
-  Fit f;
-  for (uint16_t k : ChainOfLength(segs.size(), max_n)) {
-    f.length += segs[k];
-    ++f.n;
-    if (f.length >= track) break;
-  }
-  return f;
-}
-}  // namespace
-
-FlexibleAssignment AssignFlexible(const std::vector<std::vector<uint32_t>>& segments_by_song,
-                                  const std::vector<int64_t>& track_samples, bool fill_repeat,
-                                  size_t max_extra_nodes) {
-  const size_t slots = segments_by_song.size();
-  FlexibleAssignment a;
-  a.track_for_slot.assign(slots, -1);
-  a.chains.assign(slots, {});
-  std::vector<bool> free(slots, true);
-  size_t budget = max_extra_nodes;
-  // Per-slot cap so one long track cannot use the whole node budget.
-  const size_t per_slot_cap = 600;
-
-  auto place = [&](size_t slot, int track) {
-    const auto& segs = segments_by_song[slot];
-    const size_t cap = std::min(per_slot_cap, segs.size() + budget);
-    const Fit fit = FitTrack(segs, track_samples[static_cast<size_t>(track)], cap);
-    a.track_for_slot[slot] = track;
-    a.chains[slot] = ChainOfLength(segs.size(), fit.n);
-    if (fit.n > segs.size()) budget -= fit.n - segs.size();
-    free[slot] = false;
-  };
-  auto best_slot = [&](int track) -> int {
-    int best = -1;
-    int64_t best_pad = 0;
-    for (size_t s = 0; s < slots; ++s) {
-      if (!free[s]) continue;
-      const auto& segs = segments_by_song[s];
-      const size_t cap = std::min(per_slot_cap, segs.size() + budget);
-      const Fit fit = FitTrack(segs, track_samples[static_cast<size_t>(track)], cap);
-      // Truncation (cap reached) counts as heavily penalised padding.
-      const int64_t t = track_samples[static_cast<size_t>(track)];
-      const int64_t pad = fit.length >= t ? fit.length - t : (t - fit.length) * 4;
-      if (best < 0 || pad < best_pad) {
-        best = static_cast<int>(s);
-        best_pad = pad;
-      }
-    }
-    return best;
-  };
-
-  std::vector<int> order(track_samples.size());
-  for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int>(i);
-  std::stable_sort(order.begin(), order.end(),
-                   [&](int x, int y) { return track_samples[x] > track_samples[y]; });
-  for (int t : order) {
-    const int s = best_slot(t);
-    if (s < 0) break;
-    place(static_cast<size_t>(s), t);
-  }
-  if (fill_repeat && !order.empty()) {
-    for (size_t s = 0; s < slots; ++s) {
-      if (!free[s]) continue;
-      // Track that fits this slot with the least silence.
-      int best = -1;
-      int64_t best_pad = 0;
-      const auto& segs = segments_by_song[s];
-      for (int t : order) {
-        const size_t cap = std::min(per_slot_cap, segs.size() + budget);
-        const Fit fit = FitTrack(segs, track_samples[static_cast<size_t>(t)], cap);
-        const int64_t len = track_samples[static_cast<size_t>(t)];
-        const int64_t pad = fit.length >= len ? fit.length - len : (len - fit.length) * 4;
-        if (best < 0 || pad < best_pad) best = t, best_pad = pad;
-      }
-      place(s, best);
-    }
-  }
-  return a;
-}
 
 std::vector<std::vector<uint32_t>> ReadIndexSegments(const fs::path& index_file) {
   std::ifstream in(index_file, std::ios::binary);
@@ -657,10 +523,6 @@ BuildResult Rebuild(const fs::path& library_dir, const Options& options,
     return r;
   }
 
-  std::vector<int64_t> lens;
-  for (const auto& b : built) lens.push_back(b.samples);
-  std::vector<int> assignment;
-
   // Track list for the playlist player.
   {
     const fs::path ttmp = library_dir / "tracks.tsv.tmp";
@@ -685,90 +547,13 @@ BuildResult Rebuild(const fs::path& library_dir, const Options& options,
     }
   }
 
-  // Legacy song-length fitting needs the game's ipod.mpf to rewrite.
-  std::vector<uint8_t> layout;
-  if (options.fit_layout && !options.game_music_dir.empty()) {
-    std::ifstream mf(options.game_music_dir / "ipod.mpf", std::ios::binary);
-    std::vector<uint8_t> mpf_bytes((std::istreambuf_iterator<char>(mf)), {});
-    const auto segments = ReadIndexSegments(library_dir / "ipod.s3fp");
-    mpf::Graph graph;
-    std::string err;
-    if (!mpf_bytes.empty() && !segments.empty() && mpf::Parse(mpf_bytes, &graph, &err)) {
-      std::vector<uint32_t> per_song;
-      for (const auto& sg : segments) per_song.push_back(static_cast<uint32_t>(sg.size()));
-      const auto flex = AssignFlexible(segments, lens, options.fill_repeat);
-      if (mpf::WriteWithChains(graph, per_song, flex.chains, &layout, &err)) {
-        assignment = flex.track_for_slot;
-        r.chains = flex.chains;
-      } else {
-        r.errors.push_back("song-length layout: " + err);
-        layout.clear();
-      }
-    } else if (!err.empty()) {
-      r.errors.push_back("song-length layout: " + err);
-    }
-  }
-  if (assignment.empty()) assignment = Assign(songs, lens, options.fill_repeat);
-
-  const fs::path manifest = library_dir / "manifest.tsv";
-  const fs::path tmp = library_dir / "manifest.tsv.tmp";
-  {
-    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-    out << "# skate3recomp custom music manifest (dekp23) - written in-game\n"
-        << "s3music\t1\n";
-    for (size_t slot = 0; slot < assignment.size(); ++slot) {
-      if (assignment[slot] < 0) continue;
-      const auto& b = built[static_cast<size_t>(assignment[slot])];
-      out << slot << '\t' << b.pcm << '\t' << b.samples << '\t' << b.title << '\n';
-      ++r.slots_assigned;
-    }
-    if (!out) {
-      r.message = "could not write manifest";
-      return r;
-    }
-  }
-  std::error_code ec;
-  if (!layout.empty()) {
-    const fs::path ltmp = library_dir / (std::string(kLayoutFileName) + ".tmp");
-    {
-      std::ofstream lo(ltmp, std::ios::binary | std::ios::trunc);
-      lo.write(reinterpret_cast<const char*>(layout.data()),
-               static_cast<std::streamsize>(layout.size()));
-      if (!lo) {
-        r.message = "could not write " + std::string(kLayoutFileName);
-        return r;
-      }
-    }
-    fs::rename(ltmp, library_dir / kLayoutFileName, ec);
-    if (ec) {
-      r.message = "could not replace " + std::string(kLayoutFileName) + ": " + ec.message();
-      return r;
-    }
-    r.layout_written = true;
-  }
-  fs::rename(tmp, manifest, ec);
-  if (ec) {
-    r.message = "could not replace manifest.tsv: " + ec.message();
-    return r;
-  }
   r.ok = true;
-  r.message = std::to_string(built.size()) + " track(s), " + std::to_string(r.slots_assigned) +
-              " slot(s) filled";
+  r.message = std::to_string(built.size()) + " track(s)";
   return r;
 }
 
 size_t RemoveUnusedPcm(const fs::path& library_dir) {
   std::set<std::string> used;
-  {
-    std::ifstream in(library_dir / "manifest.tsv");
-    std::string line;
-    while (std::getline(in, line)) {
-      const auto a = line.find('\t');
-      if (a == std::string::npos) continue;
-      const auto b = line.find('\t', a + 1);
-      used.insert(line.substr(a + 1, b == std::string::npos ? std::string::npos : b - a - 1));
-    }
-  }
   {
     std::ifstream in(library_dir / "tracks.tsv");
     std::string line;

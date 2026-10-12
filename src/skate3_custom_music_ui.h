@@ -21,7 +21,6 @@ namespace skate3::custom_music {
 struct PlayerSettings {
   bool enabled = true;
   bool toasts = true;
-  bool fill_repeat = true;
   int volume_percent = 100;
   bool online_lookup = false;  // MusicBrainz song info (opt-in: sends titles to musicbrainz.org)
 
@@ -34,7 +33,7 @@ struct PlayerSettings {
 struct UiState {
   std::filesystem::path library_dir;
   std::filesystem::path game_music_dir;  // original game music folder (read only)
-  bool layout_active = false;            // a song-length layout was mounted at startup
+  bool layout_active = false;            // the long-slot layout was mounted at startup
   PlayerSettings settings;
   std::mutex mutex;
 };

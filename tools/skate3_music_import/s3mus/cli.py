@@ -299,23 +299,6 @@ def cmd_index(args) -> int:
     return 0
 
 
-def cmd_prepare(args) -> int:
-    import tempfile
-    from .prepare import prepare
-    music_dir = Path(args.game_music_dir)
-    mpf = _find_ci(music_dir, "ipod.mpf")
-    if not mpf:
-        print(f"error: ipod.mpf not found in {music_dir}")
-        return 2
-    out = Path(args.out) if args.out else music_dir / "custom"
-    with tempfile.TemporaryDirectory() as td:
-        idx = Path(td) / "ipod.s3fp"
-        songs = _build_ipod_index(mpf, None, idx)
-        prepare(songs, idx, Path(args.my_music), out, args.ffmpeg, args.fill, args.gain_db)
-    print(f"\nprepared {out}")
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="skate3_music_import", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -350,15 +333,6 @@ def build_parser() -> argparse.ArgumentParser:
     ix.add_argument("--out", default="ipod.s3fp")
     ix.set_defaults(func=cmd_index)
 
-    pp = sub.add_parser("prepare", help="convert your music and lay it out for the runtime override")
-    pp.add_argument("game_music_dir", help="...\\game\\data\\audio\\music (read only)")
-    pp.add_argument("my_music", help="folder with your audio files (any format ffmpeg reads)")
-    pp.add_argument("--out", help="output folder (default: <game_music_dir>\\custom)")
-    pp.add_argument("--ffmpeg", help="path to ffmpeg if not on PATH")
-    pp.add_argument("--fill", choices=["repeat", "original"], default="repeat",
-                    help="slots left over when you have fewer than 46 tracks")
-    pp.add_argument("--gain-db", type=float, default=0.0)
-    pp.set_defaults(func=cmd_prepare)
     return p
 
 

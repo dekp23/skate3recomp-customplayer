@@ -1,134 +1,108 @@
-# skate3_music_import
+# Skate 3 custom music (dekp23): developer notes
 
-Custom music for Skate 3 in skate3recomp. Your own tracks replace the in-game iPod
-songs **at the recomp's XMA decoder output**. Game files are never modified.
+Your own music on the in-game iPod, mixed with the 46 Skate 3 songs in one playlist,
+replaced **at the recomp's XMA decoder output**. Game files are never modified. User
+documentation: the "Custom Music" section of the [repo README](../../README.md).
 
-Two parts:
+## Parts
 
-- **This Python tool** (Python 3.8+, no packages; `ffmpeg` for `prepare`): inspects the
-  game's music files, fingerprints every iPod XMA packet, converts your music and
-  assigns it to the 46 in-game song slots.
-- **Runtime** (`src/skate3_custom_music*.cpp` + the rexglue SDK fork: frame-filter hook,
-  XMA stream decoder, music file decoder): for each decoded XMA frame whose packet is an iPod packet, writes your PCM at
-  the exact song position instead. SFX, menu and world music pass through.
+| Where | What |
+|---|---|
+| `src/skate3_custom_music.*` | Engine: fingerprints each decoded XMA frame's packet, finds the iPod slot and position, asks the renderer for audio. Trace (diagnostics). |
+| `src/skate3_custom_music_player.*` | Playlist player (the renderer): slot position is the clock; anchors map it to (entry, offset). |
+| `src/skate3_custom_music_mus.*` | Reads `Ipod_Stream.mus`, builds the fingerprint index in-game, joins decoded segments. |
+| `src/skate3_custom_music_mpf.*` | Pathfinder v5.3 (`ipod.mpf`) parser/rewriter for the long-slot ("carrier") layout. |
+| `src/skate3_custom_music_library.*` | Track import/conversion, `tracks.tsv`, carrier layout, index. |
+| `src/skate3_custom_music_metadata.*` | MusicBrainz + Cover Art Archive lookups, `metadata.tsv`. |
+| `src/skate3_custom_music_ui.*` | F7 menu, now-playing pop-up, `player.ini`. |
+| `src/skate3_custom_music_glue.*` | rexglue wiring: XMA filter, VFS overlay, in-game decoders, WinHTTP. |
+| SDK fork (`custom-music-hook`) | `rex::audio::XmaFrameFilter` hook, `XmaStreamDecoder`, `DecodeAudioFile`, extra FFmpeg components (`thirdparty/ffmpeg-overlay`). |
+| This folder | Python inspector/validator/indexer (read-only), test data generators, C++ tests, `windows/run_build.cmd` (one-click Windows build of this branch into `C:\s3build`). |
 
-## Using it
+All `src/skate3_custom_music_*` modules except `glue` and `ui` are plain C++17 with no
+rexglue dependency, so they are unit-tested standalone.
 
-1. Build this fork (see the repo README, or `windows/run_build.cmd`, which does it all).
-2. Start the game. The first start builds the music index from the game's own files
-   (about a second) and the long-slot layout; nothing to run by hand.
-3. In game, press **F7** (dekp23 Custom Music):
-   - **Playlist**: the 46 Skate 3 songs and your tracks in one list. Tick what should
-     play, reorder with the arrows, **Play** any entry, **Shuffle**, **Previous / Next**.
-     Saved in `<library>\playlist.tsv`.
-   - **Add tracks...** / **Import Music folder** copy audio into `<library>\tracks` and
-     convert it in the background with the game's own built-in FFmpeg (mp3, m4a/aac/alac,
-     webm/mkv/opus, ogg, flac, wav, aiff, wma, and the audio of mp4 videos; nothing to
-     install). Title/artist/album and cover art are read from the file's tags.
-     **Rescan tracks** re-reads that folder. (An installed ffmpeg is used only as a
-     fallback for anything else.)
-   - **Use my music** (off = the game's normal soundtrack), **Pop-ups**, **Volume**
-     (`<library>\player.ini`).
-4. Picking a song in the game's own music player skips to the next playlist entry.
-5. A **NOW PLAYING** pop-up shows each new entry (bottom left).
+## Library folder
 
-Library folder: `custom_music` next to `skate3.exe` (cvar `skate3_custom_music_dir`
-overrides; settings.toml is not used for it because the settings menu rewrites that file).
+`custom_music` next to `skate3.exe` (cvar `skate3_custom_music_dir` overrides; the settings
+menu rewrites settings.toml with its own keys only, so nothing is stored there).
 
-### How it works (no game file is modified)
+| File | Written by | Content |
+|---|---|---|
+| `ipod.s3fp` | game, first start | fingerprint index (from `Ipod_Stream.mus`, ~0.3 s) |
+| `ipod_layout.mpf` | game, first start | `ipod.mpf` with every slot lengthened to >= 19.9 min |
+| `game_music/` | game, each start | hard links to the game's music files + the layout as `ipod.mpf`, mounted over `data\audio\music` |
+| `tracks/` | you / F7 | your source files |
+| `t_<hash>.pcm` (+ `.tags`, `.cover`) | F7 | converted track (44.1 kHz stereo s16le), its tags and embedded picture |
+| `tracks.tsv` | F7 | pcm, samples, title, source file, artist, album |
+| `playlist.tsv` | F7 | order, on/off, shuffle |
+| `metadata.tsv`, `covers/` | F7 (opt-in) | MusicBrainz results and cover art |
+| `player.ini` | F7 | on/off, pop-ups, volume, online lookup |
 
-- The game keeps playing its iPod "slots". Every decoded XMA frame of a slot is replaced
-  with the playlist audio at the matching position, so the slot position is the clock.
-- The game's own songs are decoded in-game from `Ipod_Stream.mus` with the runtime's XMA
-  decoder (`rex::audio::XmaStreamDecoder`); no copy is stored.
-- Every slot is lengthened to ~20 minutes by a rewritten `ipod.mpf`
-  (`<library>\ipod_layout.mpf`, served through the recomp's virtual file system from
-  `<library>\game_music`, hard links + the layout). When a slot does run out, the
-  playlist simply continues. Requires the library and the game on the same drive.
+## How it works
 
-### Limitations
+- **Engine.** Every iPod XMA packet in `Ipod_Stream.mus` is fingerprinted (FNV-1a 64 of
+  packet bytes [4, 260); 93,588 unique, 0 collisions with `Game_Stream.mus`). A decoded frame
+  is located as (slot, segment, sample) and, through the slot's chain, as a slot position.
+- **Player.** The slot position is the clock. An anchor maps a slot position to (playlist
+  entry, offset); a frame is found by walking the playlist from its anchor, so contexts that
+  decode ahead (prefetch) get exact audio. A slot that runs out continues the playlist; a
+  slot left early (song picked in the game's player) starts the next entry.
+- **Long slots.** Every slot's chain is extended to >= 19.9 minutes (8000 extra nodes,
+  233 KB `ipod.mpf`) so the game rarely changes song by itself. The rewriter only appends
+  nodes; an identity rewrite is byte-identical.
+- **The game's songs** are decoded in-game from `Ipod_Stream.mus` with
+  `rex::audio::XmaStreamDecoder` (the same FFmpeg `xmaframes` decoder the game uses,
+  0.3-1.1 s per song). Audio starts 192 samples after the declared decoder delay (576 in
+  total); missing segment tails (<= 180 samples, the frame decoder cannot flush) are
+  predicted, and every join is crossfaded over 32 samples.
+- **Your tracks** are decoded with `rex::audio::DecodeAudioFile` (FFmpeg 4.4 with extra
+  decoders and demuxers) to 44.1 kHz stereo; an installed ffmpeg is only a fallback.
+- **Song info** (opt-in): MusicBrainz recording search from tags or the file name, accepted
+  only if the score is high and the length agrees; cover from the Cover Art Archive.
+  1 request/s, User-Agent `dekp23-skate3-custom-music/1.0 ( github.com/dekp23 )`.
+- **Why not re-encode the game files:** EA-XMA is XMA2; the only XMA2 encoder is
+  Microsoft's (licensed). FFmpeg's XMA decoders are decode-only.
 
-- The in-game music player still shows the original titles/artists; the pop-up shows
-  yours. Replacing the game's own text needs the title strings, which are in EA's
-  compressed archives (not yet decoded).
-- Only the default XMA decoder path is hooked (`xma_use_old_decoder = true`).
-- The 46 game songs are listed as "Skate 3 song N" until metadata lookup (Phase 2).
-- No pause: the game appears to skip a song after ~16 s of silence.
+## Format facts (measured on v2.0.2)
 
-## Inspection commands
+- `ipod.mpf` + `Ipod_Stream.mus`: Pathfinder v5.3, big-endian, 1380 EA-XMA segments
+  (44.1 kHz stereo) = 46 songs x 30 equal segments. Section 1 of the node graph holds one
+  chain per song (entry -> 30 segment nodes -> end); section 2 holds short versions.
+- One trimmed XMA packet (< 2048 bytes) per SNS block; the first packet of a segment
+  decodes 384 samples more than it declares.
+- Observed in game (trace build): no gap between songs (1-70 ms decoder timing); each ~6 s
+  segment is decoded on a fresh XMA context; the game appears to skip a song after ~16 s
+  of silence (so the player has no pause).
+
+## Python tool (read-only)
 
 ```
 py skate3_music_import.py inspect  "...\music\ipod.mpf" [--limit 0] [--json]
 py skate3_music_import.py validate "...\music\ipod.mpf"          # exit 0 PASS / 1 errors
-py skate3_music_import.py index    "...\music\ipod.mpf" --out ipod.s3fp   # lists songs
+py skate3_music_import.py index    "...\music\ipod.mpf" --out ipod.s3fp
 py skate3_music_import.py probe    "...\music\ipod.mpf" --subsong 1 --vgmstream PATH
-py skate3_music_import.py verify   "...\music" "...\music_backup_YYYYMMDD-HHMMSS"
+py skate3_music_import.py backup / verify ...
 ```
 
-## Why runtime replacement, not re-encoding the game files
+## Tests
 
-- The music is EA-XMA (XMA2 in EA's SNR/SNS wrapper). The only XMA2 encoder is
-  Microsoft's, licensed to registered Xbox developers. FFmpeg's `xma1`, `xma2` and
-  `wmapro` are decode-only (checked with `ffmpeg -codecs`).
-- MPFmaster reads little-endian only (its own TODO); these files are big-endian.
-- rexglue already decodes every XMA frame with FFmpeg in `XmaContext::DecodeOldFrame`,
-  so replacing decoded PCM there needs no encoder and no game-file changes.
-- rexglue's bundled FFmpeg is trimmed to `libavcodec`/`libavutil` with XMA/WMA Pro only,
-  so user audio is converted offline by `prepare` to raw 44.1 kHz stereo PCM.
+Configure with `-DSKATE3_CUSTOM_MUSIC_TESTS=ON` (Linux/macOS; tests need no rexglue build)
+and run `ctest -R custom_music`. Tests that need the game's music files run only when
+`-DSKATE3_TEST_MUSIC_DIR=<game>/data/audio/music` is set (index and replay data are
+generated from it by the test fixtures). See `tests/cpp/CMakeLists.txt`.
 
-## Format facts
+| Test | Checks |
+|---|---|
+| `test_player` | playlist mapping with prefetch/lag, slot ran out / left early, next/previous, shuffle, persistence, song info applied |
+| `test_metadata` | query building from real file names, scoring, odd JSON types, 503 retry, offline, cache |
+| `test_custom_music` | engine replay of real packets: every replaced frame is the renderer's audio at the exact slot position |
+| `test_integration` | real packets -> engine -> player, prefetch overlap and an in-game pick, sample-exact |
+| `test_library` | converter path and sidecars, ffmpeg fallback, engine controls, carrier layout |
+| `test_mpf` | identity rewrite byte-identical, modified graph valid |
+| `test_mus` | in-game index byte-identical to the Python index |
+| Python `unittest` | MPF/MUS parsers, fingerprints |
 
-Upstream-documented (vgmstream `src/meta/ea_eaac_mpf_mus.c`, `ea_eaac.c`,
-`ea_eaac_streamfile.h`): `game/ipod/world.mpf` pair with `*_Stream.mus` in Skate 1/2/3;
-MPF magic `PFDx`, Pathfinder v5.2/5.3, either byte order; EAAC SNR+SNS audio; MUS v5.3
-table at 0x28 with 0x1C-byte entries; EA-XMA SNS blocks = header, samples, per-stream
-`size*4` + XMA packet data.
-
-Measured on the real v2.0.2 install (2026-10-11):
-
-| File | Pathfinder | Endian | Tracks | Samples | Codec | Validate |
-|---|---|---|---|---|---|---|
-| `ipod.mpf` + `Ipod_Stream.mus` (180,580,480 B) | v5.3 | big | 2 (track 1 empty, checksum `F1F1F1F1`) | 1380 | EA-XMA 44.1 kHz stereo | PASS |
-| `game.mpf` + `Game_Stream.mus` (28,052,480 B) | v5.3 | big | 1 | 1074 | EA-XMA 44.1 kHz stereo | PASS |
-| `world.mpf` | v5.3 | big | 1 | 5725 | MUS not checked | — |
-
-- iPod: 1380 segments = 46 songs x 30 equal-length segments, **confirmed by the MPF
-  node graph**: section 1 holds one chain per song (entry node -> 30 segment nodes, wave =
-  sample index + 1 -> end node); section 2 holds a short version of each song (last 11
-  segments). Named variables: `ipodsection`, `ipod`, `replay`. Lengths 109-369 s.
-- One trimmed XMA packet per SNS block (< 2048 bytes; the game pads it for hardware).
-  93,589 packets; block samples sum exactly to each SNR sample count.
-- Every segment: first packet decodes 384 samples more than it declares (decoder
-  delay); middle packets exact; 515–713 samples of overrun at the end. The runtime
-  maps decoded sample `d` of a segment to song position `segment_start + d - 384`.
-- Fingerprint = FNV-1a 64 of packet bytes [4, 260): 93,588 unique (1 duplicate,
-  117 packets too short and bridged at runtime); 0 collisions with `Game_Stream.mus`.
-
-## Verification
-
-- 17 Python unit tests (`py -m unittest discover -s tests`).
-- vgmstream + FFmpeg decodes real iPod segment 1 to 9.50 s of non-silent stereo audio.
-- C++ engine replay on real data (`tests/cpp/test_custom_music.cpp` + `tests/sim_stream.py`):
-  real iPod packets padded to 2048 bytes, two songs interleaved on two contexts plus
-  `Game_Stream` packets, an unassigned song and a reset-and-reused context.
-  Result: 22,560/22,560 frames replaced, **0 wrong samples** versus the expected user
-  PCM, 0 false replacements. Clean under ASan/UBSan, `-Wall -Wextra -Werror`, C++17/20/23.
-- rexglue `xma_context.cpp` with the hook and the glue file pass Clang 18 C++23
-  semantic checks against the real SDK headers. **The full recomp has not been built
-  here** (needs your game dump; too large for this machine).
-
-```
-c++ -std=c++23 -O2 -Isrc src/skate3_custom_music.cpp tools/skate3_music_import/tests/cpp/test_custom_music.cpp -o test_custom_music
-python3 tools/skate3_music_import/tests/sim_stream.py MUSIC/ipod.mpf MUSIC/game.mpf sim.bin
-./test_custom_music MUSIC/custom sim.bin
-```
-
-## Roadmap
-
-1. *(done)* Inspector/validator; runtime replacement engine + hook; confirmed in game.
-2. *(done)* Now-playing pop-up, F7 menu, in-game library rebuild.
-3. *(done, needs in-game confirmation)* Song lengths fitted via the MPF node graph.
-4. Replace titles in the game's own music player (decode EA "EB" archives or hook the
-   text lookup).
+Development notes and the in-game test history: [docs/DEVELOPMENT_NOTES.md](docs/DEVELOPMENT_NOTES.md).
 
 Legal: use only your own game copy; don't distribute game files or copyrighted music.

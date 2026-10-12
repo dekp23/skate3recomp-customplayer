@@ -15,8 +15,6 @@ constexpr uint64_t kFnvPrime = 0x100000001B3ull;
 // context are treated as part of the same song for this many frames. Covers the 117
 // iPod packets too short to fingerprint and the single ambiguous duplicate.
 constexpr uint32_t kMaxBridgeFrames = 4;
-// PCM read-ahead per slot (stereo sample frames).
-constexpr int64_t kCacheFrames = 32768;
 
 inline uint16_t ToBigEndian16(int16_t v) {
   const auto u = static_cast<uint16_t>(v);
@@ -31,21 +29,6 @@ bool ReadLE(std::istream& in, T* out) {
   for (size_t i = 0; i < sizeof(T); ++i) v |= static_cast<T>(b[i]) << (8 * i);
   *out = v;
   return true;
-}
-
-std::vector<std::string> SplitTabs(const std::string& line) {
-  std::vector<std::string> out;
-  std::string cur;
-  for (char c : line) {
-    if (c == '\t') {
-      out.push_back(cur);
-      cur.clear();
-    } else if (c != '\r') {
-      cur.push_back(c);
-    }
-  }
-  out.push_back(cur);
-  return out;
 }
 
 }  // namespace
@@ -73,25 +56,8 @@ uint64_t Fingerprint(const uint8_t* packet) {
   return h;
 }
 
-struct Engine::Slot {
-  std::filesystem::path path;
-  int64_t num_samples = 0;
-  std::string title;
-  std::ifstream file;
-  std::vector<int16_t> cache;  // interleaved stereo
-  int64_t cache_start = -1;
-  int64_t cache_frames = 0;
-  bool failed = false;
-};
-
 Engine::Engine() = default;
 Engine::~Engine() = default;
-
-size_t Engine::num_assigned() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return static_cast<size_t>(
-      std::count_if(slots_.begin(), slots_.end(), [](const auto& s) { return s != nullptr; }));
-}
 
 size_t Engine::num_songs() const {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -156,21 +122,6 @@ void Engine::SetChains(std::vector<std::vector<uint16_t>> chains) {
   contexts_.clear();
 }
 
-std::vector<SlotInfo> Engine::Slots() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  std::vector<SlotInfo> out(songs_.size());
-  for (size_t i = 0; i < out.size(); ++i) {
-    out[i].song = static_cast<uint32_t>(i);
-    out[i].song_seconds = songs_[i].length / kSampleRate;
-    if (i < slots_.size() && slots_[i]) {
-      out[i].assigned = true;
-      out[i].title = slots_[i]->title;
-      out[i].track_seconds = static_cast<double>(slots_[i]->num_samples) / kSampleRate;
-    }
-  }
-  return out;
-}
-
 void Engine::SetGain(float gain) {
   gain_.store(std::clamp(gain, 0.0f, 2.0f), std::memory_order_relaxed);
 }
@@ -230,53 +181,7 @@ bool Engine::Load(const std::filesystem::path& dir, const LogFn& log) {
     return fail("index not sorted");
   }
 
-  // ---- manifest (optional: per-slot tracks; the playlist player does not need it)
-  std::ifstream man(dir / "manifest.tsv");
-  std::vector<std::unique_ptr<Slot>> slots(num_songs);
-  std::string line;
-  bool header_ok = false;
-  size_t line_no = 0, assigned = 0;
-  while (std::getline(man, line)) {
-    ++line_no;
-    if (line.empty() || line[0] == '#') continue;
-    auto cols = SplitTabs(line);
-    if (!header_ok) {
-      if (cols.size() < 2 || cols[0] != "s3music" || cols[1] != "1") {
-        return fail("manifest header missing or unsupported");
-      }
-      header_ok = true;
-      continue;
-    }
-    if (cols.size() < 3) return fail("manifest line " + std::to_string(line_no) + " malformed");
-    uint32_t song = 0;
-    int64_t samples = 0;
-    try {
-      song = static_cast<uint32_t>(std::stoul(cols[0]));
-      samples = std::stoll(cols[2]);
-    } catch (...) {
-      return fail("manifest line " + std::to_string(line_no) + " has bad numbers");
-    }
-    if (song >= num_songs) return fail("manifest references song " + cols[0] + " out of range");
-    if (cols[1].find("..") != std::string::npos || cols[1].find('/') != std::string::npos ||
-        cols[1].find('\\') != std::string::npos) {
-      return fail("manifest file names must be plain names inside the folder");
-    }
-    auto slot = std::make_unique<Slot>();
-    slot->path = dir / PathFromUtf8(cols[1]);
-    slot->num_samples = samples;
-    slot->title = cols.size() > 3 ? cols[3] : cols[1];
-    const auto size = std::filesystem::file_size(slot->path, ec);
-    if (ec) return fail("missing PCM file " + cols[1]);
-    if (static_cast<int64_t>(size / 4) < samples) {
-      return fail("PCM file " + cols[1] + " shorter than manifest says");
-    }
-    if (!slots[song]) ++assigned;
-    slots[song] = std::move(slot);
-  }
-  if (man && !header_ok && line_no > 0) return fail("manifest is empty");
-
   {
-    // Old slots (and their open files) are destroyed after the swap, outside the lock.
     std::lock_guard<std::mutex> lock(mutex_);
     dir_ = dir;
     index_.swap(index);
@@ -284,15 +189,13 @@ bool Engine::Load(const std::filesystem::path& dir, const LogFn& log) {
       ApplyChain(songs[i], i < chains_override_.size() ? &chains_override_[i] : nullptr);
     }
     songs_.swap(songs);
-    slots_.swap(slots);
     contexts_.clear();
-    last_song_ = -1;
     loaded_.store(true, std::memory_order_release);
   }
   if (log) {
     std::ostringstream msg;
-    msg << "custom music: loaded " << num_entries << " fingerprints, " << assigned << "/"
-        << num_songs << " iPod songs replaced, from " << PathToUtf8(dir);
+    msg << "custom music: loaded " << num_entries << " fingerprints for " << num_songs
+        << " iPod songs from " << PathToUtf8(dir);
     log(LogLevel::kInfo, msg.str());
   }
   return true;
@@ -302,45 +205,6 @@ const Engine::IndexEntry* Engine::Lookup(uint64_t hash) const {
   auto it = std::lower_bound(index_.begin(), index_.end(), hash,
                              [](const IndexEntry& e, uint64_t h) { return e.hash < h; });
   return (it != index_.end() && it->hash == hash) ? &*it : nullptr;
-}
-
-bool Engine::ReadPcm(Slot& slot, int64_t pos, int16_t* out) {
-  // out: kSamplesPerFrame stereo frames. Beyond end of track -> silence.
-  std::fill(out, out + kSamplesPerFrame * 2, int16_t{0});
-  if (slot.failed || pos >= slot.num_samples || pos + kSamplesPerFrame <= 0) return true;
-  if (!slot.file.is_open()) {
-    slot.file.open(slot.path, std::ios::binary);
-    if (!slot.file) {
-      slot.failed = true;
-      return false;
-    }
-  }
-  for (uint32_t i = 0; i < kSamplesPerFrame; ++i) {
-    const int64_t p = pos + i;
-    if (p < 0) continue;
-    if (p >= slot.num_samples) break;
-    if (slot.cache_start < 0 || p < slot.cache_start || p >= slot.cache_start + slot.cache_frames) {
-      const int64_t start = p;
-      const int64_t count = std::min<int64_t>(kCacheFrames, slot.num_samples - start);
-      slot.cache.resize(static_cast<size_t>(count * 2));
-      slot.file.clear();
-      slot.file.seekg(start * 4);
-      std::vector<uint8_t> raw(static_cast<size_t>(count * 4));
-      if (!slot.file.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(raw.size()))) {
-        slot.failed = true;
-        return false;
-      }
-      for (size_t k = 0; k < slot.cache.size(); ++k) {
-        slot.cache[k] = static_cast<int16_t>(raw[2 * k] | (raw[2 * k + 1] << 8));  // s16le
-      }
-      slot.cache_start = start;
-      slot.cache_frames = count;
-    }
-    const size_t c = static_cast<size_t>((p - slot.cache_start) * 2);
-    out[2 * i] = slot.cache[c];
-    out[2 * i + 1] = slot.cache[c + 1];
-  }
-  return true;
 }
 
 bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index,
@@ -445,13 +309,6 @@ bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index
   }
   st.next_pos = pos + kSamplesPerFrame;
 
-  // Now-playing: a different song, or the same song after a pause, counts as a new start.
-  if (st.song != last_song_ || now - last_time_ > std::chrono::seconds(3)) {
-    ++serial_;
-  }
-  last_song_ = st.song;
-  last_pos_ = pos;
-  last_time_ = now;
   {
     SongLayout& cur = songs_[static_cast<size_t>(st.song)];
     cur.last_pos = std::max(cur.last_pos, pos);
@@ -459,16 +316,10 @@ bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index
     cur.last_time = now;
   }
 
-  if (!enabled()) return false;
+  if (!enabled() || !renderer_) return false;
   int16_t stereo[kSamplesPerFrame * 2];
-  if (renderer_) {
-    if (!renderer_->Render(st.song, pos, songs_[static_cast<size_t>(st.song)].length, stereo)) {
-      return false;
-    }
-  } else {
-    Slot* slot = slots_[static_cast<size_t>(st.song)].get();
-    if (!slot) return false;  // song kept as original game audio
-    if (!ReadPcm(*slot, pos, stereo)) return false;
+  if (!renderer_->Render(st.song, pos, songs_[static_cast<size_t>(st.song)].length, stereo)) {
+    return false;
   }
 
   const float g = gain();
@@ -586,26 +437,6 @@ std::string FormatTrace(const TraceEvent& e) {
       break;
   }
   return buf;
-}
-
-NowPlaying Engine::GetNowPlaying(Clock::time_point now, Clock::duration window) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  NowPlaying np;
-  np.serial = serial_;
-  if (last_song_ < 0 || static_cast<size_t>(last_song_) >= songs_.size() ||
-      now - last_time_ > window) {
-    return np;
-  }
-  np.active = true;
-  np.song = static_cast<uint32_t>(last_song_);
-  np.position_seconds = std::max<int64_t>(0, last_pos_) / kSampleRate;
-  np.slot_seconds = songs_[np.song].length / kSampleRate;
-  if (const Slot* slot = slots_[np.song].get(); slot && enabled()) {
-    np.replaced = true;
-    np.title = slot->title;
-    np.track_seconds = static_cast<double>(slot->num_samples) / kSampleRate;
-  }
-  return np;
 }
 
 Stats Engine::stats() const {

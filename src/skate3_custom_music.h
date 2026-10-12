@@ -1,15 +1,12 @@
-// Skate 3 custom music (dekp23): replaces in-game iPod songs with user audio at the XMA
-// decoder output. Game files are never modified.
+// Skate 3 custom music (dekp23): replaces what the in-game iPod plays at the XMA decoder
+// output. Game files are never modified.
 //
 // How it works
-//   The library folder (see skate3_custom_music_library.h) contains:
-//     ipod.s3fp     fingerprints of every XMA packet in Ipod_Stream.mus, each mapped to
-//                   (song slot, sample position within that song)
-//     manifest.tsv  song slot -> user PCM file (44.1 kHz stereo s16le) + title
-//     *.pcm         converted user tracks
-//   The runtime calls Engine::OnFrame for every decoded XMA frame. If the frame's source
-//   packet is an iPod packet, the 512 decoded samples are replaced with the user track at
-//   the same position. Everything else (SFX, other music) passes through untouched.
+//   <library>/ipod.s3fp fingerprints every XMA packet in Ipod_Stream.mus and maps it to
+//   (song slot, sample position within that slot). The runtime calls Engine::OnFrame for
+//   every decoded XMA frame; for an iPod frame the engine works out the slot position and
+//   asks the Renderer (the playlist player, skate3_custom_music_player.h) for the audio at
+//   that position. Everything else (SFX, other music) passes through untouched.
 //
 // This file is pure C++17 with no rexglue dependency so it can be unit-tested standalone.
 #pragma once
@@ -44,27 +41,8 @@ struct Stats {
   uint64_t frames_seen = 0;        // frames offered to OnFrame
   uint64_t frames_matched = 0;     // frames whose packet was an iPod packet
   uint64_t frames_continued = 0;   // unmatched frames bridged on an active iPod context
-  uint64_t frames_overridden = 0;  // frames actually replaced with user audio
+  uint64_t frames_overridden = 0;  // frames actually replaced by the renderer
   uint64_t resyncs = 0;            // position discontinuities (song change, seek, segment trim)
-};
-
-struct SlotInfo {
-  uint32_t song = 0;
-  double song_seconds = 0;   // length of the in-game song this slot replaces
-  bool assigned = false;
-  std::string title;         // user track title (empty if not assigned)
-  double track_seconds = 0;  // user track length
-};
-
-struct NowPlaying {
-  bool active = false;        // an iPod song was decoded within the recent window
-  bool replaced = false;      // ... and it is playing user audio
-  uint32_t song = 0;
-  std::string title;
-  double position_seconds = 0;
-  double track_seconds = 0;   // user track length (0 if not replaced)
-  double slot_seconds = 0;    // in-game slot length
-  uint64_t serial = 0;        // increments every time a different song starts
 };
 
 // Diagnostic trace of iPod playback (Phase 0: how the game moves between songs).
@@ -100,9 +78,8 @@ struct SlotEvent {
   bool restart = false;       // same slot started again from its beginning
 };
 
-// Supplies the audio for iPod frames instead of the per-slot manifest tracks
-// (the playlist player). Called with the engine lock held, on the XMA worker thread:
-// must not block.
+// Supplies the audio for iPod frames (the playlist player). Called with the engine lock
+// held, on the XMA worker thread: must not block.
 class Renderer {
  public:
   virtual ~Renderer() = default;
@@ -124,16 +101,14 @@ class Engine {
   Engine(const Engine&) = delete;
   Engine& operator=(const Engine&) = delete;
 
-  // Loads <dir>/ipod.s3fp and <dir>/manifest.tsv. File work happens outside the audio
+  // Loads <dir>/ipod.s3fp. File work happens outside the audio
   // lock; the new state is swapped in atomically, so this is safe while music plays.
   // On failure the previous state (if any) is kept and false is returned.
   bool Load(const std::filesystem::path& dir, const LogFn& log);
   bool loaded() const { return loaded_.load(std::memory_order_acquire); }
   std::filesystem::path dir() const;
   size_t num_songs() const;
-  size_t num_assigned() const;
   std::vector<uint32_t> song_samples() const;
-  std::vector<SlotInfo> Slots() const;
 
   // Segment play order per song slot ("chain"), e.g. from a rewritten ipod.mpf: a slot
   // can repeat its own segments (longer) or stop early (shorter). Segment indices are
@@ -162,13 +137,9 @@ class Engine {
   // Forget per-context position state (e.g. when the game resets a context).
   void ResetContext(uint32_t context_id);
 
-  // What the iPod is playing, based on frames decoded within `window` before `now`.
-  NowPlaying GetNowPlaying(Clock::time_point now,
-                           Clock::duration window = std::chrono::milliseconds(1500)) const;
-
   Stats stats() const;
 
-  // Non-owning; nullptr returns to per-slot manifest tracks. The renderer must outlive
+  // Non-owning; nullptr passes the game's audio through. The renderer must outlive
   // its registration.
   void SetRenderer(Renderer* renderer);
 
@@ -188,7 +159,6 @@ class Engine {
     uint16_t segment;  // within the song
     int32_t offset;    // first frame of the packet, relative to its segment's start
   };
-  struct Slot;
   struct ContextState {
     int32_t song = -1;
     int32_t chain_index = -1;  // occurrence of the current segment in the song's chain
@@ -206,7 +176,6 @@ class Engine {
   };
 
   const IndexEntry* Lookup(uint64_t hash) const;
-  bool ReadPcm(Slot& slot, int64_t pos, int16_t* out_stereo);
   int32_t ResolveChainIndex(ContextState& st, SongLayout& song, uint16_t segment);
   static void ApplyChain(SongLayout& song, const std::vector<uint16_t>* chain);
 
@@ -217,14 +186,8 @@ class Engine {
   std::vector<IndexEntry> index_;
   std::vector<SongLayout> songs_;
   std::vector<std::vector<uint16_t>> chains_override_;
-  std::vector<std::unique_ptr<Slot>> slots_;  // by song index; null = not assigned
   std::unordered_map<uint32_t, ContextState> contexts_;
   Stats stats_;
-  // Now-playing tracking.
-  int32_t last_song_ = -1;
-  int64_t last_pos_ = 0;
-  Clock::time_point last_time_{};
-  uint64_t serial_ = 0;
   // Slot tracking (segment starts on any context).
   int32_t slot_song_ = -1;
   int32_t prev_slot_song_ = -1;

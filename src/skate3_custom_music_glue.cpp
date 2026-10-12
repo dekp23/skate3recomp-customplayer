@@ -40,9 +40,9 @@ REXCVAR_DEFINE_STRING(skate3_custom_music_dir, "", "Skate 3",
                       "Custom music folder (default: custom_music next to the executable, "
                       "else <game>/data/audio/music/custom)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(skate3_custom_music_trace, true, "Skate 3",
-                    "Log iPod playback events (MUSICTRACE lines: segment starts, song "
-                    "changes, context resets) for diagnosing song transitions")
+REXCVAR_DEFINE_BOOL(skate3_custom_music_trace, false, "Skate 3",
+                    "Diagnostics: log iPod playback events (MUSICTRACE lines: segment "
+                    "starts, song changes, context resets) and run an XMA decoder self-test")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace skate3::custom_music {
@@ -155,7 +155,7 @@ std::filesystem::path ResolveLibraryDir(const std::filesystem::path& game_data_r
 
 namespace {
 
-// Builds <library>/game_music: hard links to the game's music files plus the song-length
+// Builds <library>/game_music: hard links to the game's music files plus the long-slot
 // layout as ipod.mpf. Returns that folder, or empty if no layout applies.
 std::filesystem::path PrepareMusicOverlay(const std::filesystem::path& library,
                                           const std::filesystem::path& game_music) {
@@ -195,7 +195,7 @@ std::filesystem::path PrepareMusicOverlay(const std::filesystem::path& library,
     fs::remove(dst, e1);
     fs::create_hard_link(entry.path(), dst, e1);
     if (e1) {
-      REXLOG_WARN("custom music: cannot hard-link {} ({}); song lengths stay original. "
+      REXLOG_WARN("custom music: cannot hard-link {} ({}); iPod slots keep their original length. "
                   "The library and the game must be on the same drive.",
                   PathToUtf8(name), e1.message());
       return {};

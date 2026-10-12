@@ -1,6 +1,9 @@
-# Skate 3 Custom Music (dekp23): handoff for 2026-10-12
+> Working notes kept during development (decisions, measurements, in-game test results).
+> Current design and usage: [../README.md](../README.md).
 
-## Where things stand (2026-10-11, end of day)
+# Skate 3 Custom Music (dekp23): development notes
+
+## History (2026-10-11, end of day: first version)
 
 **Working and confirmed in game**
 - Your tracks replace iPod songs at the recomp's XMA decoder output. Game files untouched.
@@ -132,6 +135,13 @@ Toolchain on the laptop: LLVM 23.1.3, CMake 4.4.4, Ninja, VS 2026 Build Tools, P
       soundtrack was never released as an album). Needs the game's own list (Phase 4) or
       AcoustID.
 - [ ] Manual edit fields (not started).
+
+### Pre-PR cleanup (2026-10-12)
+- Diagnostics (MUSICTRACE, decoder self-test) off by default (cvar `skate3_custom_music_trace`).
+- Removed the first approach (one track per slot, `manifest.tsv`, slot length fitting) from
+  the engine and library, and the Python `prepare` command + scripts. Engine is
+  renderer-only.
+- C++ tests wired into CMake/CTest (`tests/cpp/CMakeLists.txt`).
 
 ### Phase 3 - covers in UI
 - [ ] Pop-up: cover + title + artist + album, dekp23 brand kept. Playlist rows with thumbnails.

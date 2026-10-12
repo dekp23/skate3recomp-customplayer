@@ -94,6 +94,25 @@ Saved games live in the user data folder by default (`%APPDATA%\skate3`, i.e.
 
 The builds include an experimental true ultrawide mode: the native renderer draws the world at your display's full aspect ratio (21:9 and wider) with a matching wider field of view, while the HUD and menus stay centered and undistorted. Enable it via the Aspect Ratio setting or `skate3_ultrawide = true`. It requires the native renderer; with the emulated renderer the game presents in standard 16:9. Rendering more of the scene costs proportionally more GPU time.
 
+## Custom Music (dekp23)
+
+Play your own music on the in-game iPod, mixed with the 46 Skate 3 songs in one playlist.
+Game files are never modified.
+
+- Press **F7** in game. **Add tracks...** or **Import Music folder** copies files into
+  `custom_music\tracks` (next to `skate3.exe`) and converts them in the background with the
+  game's built-in FFmpeg: mp3, m4a/aac/alac, webm/mkv/opus, ogg, flac, wav, aiff, wma and the
+  audio of mp4 videos. Nothing to install.
+- **Playlist**: tick what should play, reorder, **Play** any entry, **Shuffle**,
+  **Previous / Next**. Picking a song in the game's own music player skips to the next entry.
+- **Use my music** off = the normal soundtrack; **Pop-ups** show what is playing; **Volume**.
+- **Look up song info online (MusicBrainz)** (off by default) finds the real title, artist,
+  album and cover art for your tracks. It sends the track's title (or file name) to
+  musicbrainz.org and coverartarchive.org, one request per second; results are cached.
+- The 46 game songs are listed as "Skate 3 song N" for now.
+
+How it works and developer notes: [tools/skate3_music_import](tools/skate3_music_import/README.md).
+
 ## Controls
 
 - Standard Xbox controls using an Xbox controller are the preferred and main input method.
@@ -111,6 +130,7 @@ The builds include an experimental true ultrawide mode: the native renderer draw
 - Left stick press: Shift
 - Right stick press: MMB
 - Back/Start: Tab/Return
+- Custom music menu: F7
 
 ## Building from Source
 
@@ -277,9 +297,11 @@ the native renderer then draws true widescreen frames at that aspect.
 
 ## rexglue Fork
 
-`third_party/rexglue-sdk` is pinned as a Git submodule to the
-`skate3-sdk-clean` branch of the Skate-specific rexglue fork. Clone
-recursively or run:
+`third_party/rexglue-sdk` is pinned as a Git submodule to the `custom-music-hook` branch
+of [dekp23/rexglue-skate3-customplayer](https://github.com/dekp23/rexglue-skate3-customplayer),
+which is the Skate-specific rexglue fork (`skate3-sdk-clean`) plus the custom music
+additions: an XMA frame filter hook, an XMA stream decoder, a music file decoder, and extra
+FFmpeg decoders/demuxers (libavformat + libswresample). Clone recursively or run:
 
 ```sh
 git submodule sync --recursive
@@ -297,3 +319,7 @@ needed by this project.
   used by this project.
 - [Xenia](https://github.com/xenia-project/xenia), whose Xbox 360 research and
   tooling have helped the broader recompilation ecosystem.
+- Custom music: [FFmpeg](https://ffmpeg.org) (LGPL 2.1+) for decoding,
+  [vgmstream](https://github.com/vgmstream/vgmstream) documentation of EA's MPF/MUS formats,
+  [MusicBrainz](https://musicbrainz.org) and the [Cover Art Archive](https://coverartarchive.org)
+  for song info, [nlohmann/json](https://github.com/nlohmann/json).

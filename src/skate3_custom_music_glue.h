@@ -8,11 +8,12 @@
 
 namespace skate3::custom_music {
 
-// Loads the custom music folder (cvar skate3_custom_music_dir, default
-// <game_data_root>/data/audio/music/custom) and installs the XMA frame filter.
-// No-op if disabled (cvar skate3_custom_music = false) or the folder is absent.
-// Returns a host folder to mount over the guest data\audio\music folder (song-length
-// layout active), or an empty path.
+// Sets up custom music: library folder (cvar skate3_custom_music_dir, default custom_music
+// next to the executable; created if missing), fingerprint index and long-slot layout built
+// from the game's files when needed, playlist player attached, XMA frame filter installed.
+// No-op if disabled (cvar skate3_custom_music = false).
+// Returns a host folder to mount over the guest data\audio\music folder (long slots
+// active), or an empty path.
 std::filesystem::path Install(const std::filesystem::path& game_data_root);
 
 // Guest path the music overlay replaces.

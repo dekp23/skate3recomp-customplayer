@@ -364,6 +364,13 @@ else()
 endif()
 
 target_link_libraries(skate3 PRIVATE rex::runtime)
+
+# Custom music unit tests (plain C++17; run with ctest). Off by default.
+option(SKATE3_CUSTOM_MUSIC_TESTS "Build the custom music tests" OFF)
+if(SKATE3_CUSTOM_MUSIC_TESTS)
+    enable_testing()
+    add_subdirectory(tools/skate3_music_import/tests/cpp ${CMAKE_BINARY_DIR}/custom_music_tests)
+endif()
 rexglue_configure_target(skate3)
 
 if(APPLE)

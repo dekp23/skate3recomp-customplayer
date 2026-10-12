@@ -5,16 +5,16 @@
 //       tools/skate3_music_import/tests/cpp/test_custom_music.cpp -o test_custom_music
 // Run:
 //   ./test_custom_music                       unit tests only
-//   ./test_custom_music CUSTOM_DIR SIM.bin [CHAINS.txt]  + end-to-end replay of real packets
-//     CUSTOM_DIR: output of `skate3_music_import.py prepare`
-//     SIM.bin:    output of tests/sim_stream.py
+//   ./test_custom_music LIBRARY_DIR SIM.bin [CHAINS.txt]  + end-to-end replay of real packets
+//     LIBRARY_DIR: folder with ipod.s3fp (`skate3_music_import.py index ... --out`)
+//     SIM.bin:     output of tests/sim_stream.py
+//   Every replaced frame must hold the renderer's audio for exactly that slot position.
 #include "skate3_custom_music.h"
 
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <map>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -47,25 +47,26 @@ static void TestMissingFolderIsInert() {
   CHECK(!e.OnFrame(0, pkt, 0, 2, pcm), "inert engine must not override");
 }
 
-struct Manifest {
-  std::map<int, std::pair<std::string, int64_t>> slots;  // song -> (file, samples)
-};
-
-static Manifest ReadManifest(const std::string& dir) {
-  Manifest m;
-  std::ifstream in(dir + "/manifest.tsv");
-  std::string line;
-  while (std::getline(in, line)) {
-    if (line.empty() || line[0] == '#' || line.rfind("s3music", 0) == 0) continue;
-    std::istringstream ss(line);
-    int song;
-    std::string file;
-    int64_t n;
-    ss >> song >> file >> n;
-    m.slots[song] = {file, n};
-  }
-  return m;
+// Deterministic "track" audio per slot and position.
+static int16_t Synth(int song, int64_t pos, int ch) {
+  const int64_t v = (song * 7919 + pos * 31 + ch * 17) % 30000;
+  return static_cast<int16_t>((v < 0 ? v + 30000 : v) - 15000);
 }
+
+// Renders every slot except kPassthroughSong, which keeps the game's audio.
+constexpr int kPassthroughSong = 16;
+struct SynthRenderer : Renderer {
+  void OnSlotStart(const SlotEvent&) override { ++slot_starts; }
+  bool Render(int32_t song, int64_t pos, int64_t, int16_t* stereo) override {
+    if (song == kPassthroughSong) return false;
+    for (int i = 0; i < 512; ++i) {
+      stereo[2 * i] = Synth(song, pos + i, 0);
+      stereo[2 * i + 1] = Synth(song, pos + i, 1);
+    }
+    return true;
+  }
+  int slot_starts = 0;
+};
 
 static int RunReplay(const std::string& dir, const std::string& sim_path,
                      const std::string& chains_path) {
@@ -90,15 +91,8 @@ static int RunReplay(const std::string& dir, const std::string& sim_path,
   CHECK(e.Load(dir, [&](LogLevel, const std::string& s) { logs.push_back(s); std::cout << s << "\n"; }),
         "engine load");
   if (!e.loaded()) return 1;
-  const Manifest man = ReadManifest(dir);
-
-  std::map<int, std::vector<int16_t>> pcm;  // song -> stereo s16
-  for (auto& [song, fs] : man.slots) {
-    std::ifstream f(dir + "/" + fs.first, std::ios::binary);
-    std::vector<int16_t> v(static_cast<size_t>(fs.second * 2));
-    f.read(reinterpret_cast<char*>(v.data()), static_cast<std::streamsize>(v.size() * 2));
-    pcm[song] = std::move(v);
-  }
+  SynthRenderer renderer;
+  e.SetRenderer(&renderer);
 
   std::ifstream sim(sim_path, std::ios::binary);
   uint64_t frames = 0, expected_override = 0, got_override = 0, bad_samples = 0, wrong_pass = 0;
@@ -119,17 +113,15 @@ static int RunReplay(const std::string& dir, const std::string& sim_path,
       uint8_t buf[2048];
       std::memset(buf, 0xAB, sizeof(buf));  // "original decoded audio" sentinel
       const bool replaced = e.OnFrame(ctx, pkt.data(), static_cast<int>(f), 2, buf);
-      const bool should = song >= 0 && man.slots.count(song);
+      const bool should = song >= 0 && song != kPassthroughSong;
       if (should) {
         ++expected_override;
         songs_checked.insert(song);
         if (!replaced) continue;
         ++got_override;
-        const auto& src = pcm.at(song);
         const int64_t pos = frame0 + static_cast<int64_t>(f) * 512;
         for (int i = 0; i < 1024; ++i) {
-          const int64_t p = pos * 2 + i;
-          const int16_t want = (p >= 0 && p < static_cast<int64_t>(src.size())) ? src[p] : 0;
+          const int16_t want = Synth(song, pos + i / 2, i % 2);
           const uint16_t be = static_cast<uint16_t>(buf[2 * i] << 8 | buf[2 * i + 1]);
           if (static_cast<int16_t>(be) != want) ++bad_samples;
         }
@@ -150,6 +142,7 @@ static int RunReplay(const std::string& dir, const std::string& sim_path,
   std::cout << "trace: segments=" << seg_events << " song_changes=" << song_events
             << " resets=" << reset_events << "\n";
   CHECK(seg_events > 0 && song_events > 0, "trace must report segment starts and song changes");
+  CHECK(renderer.slot_starts > 0, "renderer is told about slot starts");
 
   const Stats st = e.stats();
   std::cout << "replay: frames=" << frames << " expected_override=" << expected_override
@@ -159,9 +152,9 @@ static int RunReplay(const std::string& dir, const std::string& sim_path,
             << " bridged=" << st.frames_continued << " overridden=" << st.frames_overridden
             << " resyncs=" << st.resyncs << " songs_checked=" << songs_checked.size() << "\n";
   CHECK(frames > 0, "sim stream empty");
-  CHECK(got_override == expected_override, "every assigned iPod frame must be overridden");
-  CHECK(bad_samples == 0, "overridden PCM must equal user track at the exact position");
-  CHECK(wrong_pass == 0, "non-iPod / unassigned / reset contexts must pass through");
+  CHECK(got_override == expected_override, "every rendered iPod frame must be replaced");
+  CHECK(bad_samples == 0, "replaced PCM must be the renderer's audio at the exact slot position");
+  CHECK(wrong_pass == 0, "non-iPod frames and passthrough slots must keep the game's audio");
   return 0;
 }
 

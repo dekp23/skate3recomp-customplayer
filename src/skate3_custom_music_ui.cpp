@@ -120,7 +120,6 @@ PlayerSettings PlayerSettings::Load(const fs::path& dir) {
     try {
       if (k == "enabled") s.enabled = v == "1";
       if (k == "toasts") s.toasts = v == "1";
-      if (k == "fill") s.fill_repeat = v != "original";
       if (k == "volume") s.volume_percent = std::clamp(std::stoi(v), 0, 200);
       if (k == "lookup") s.online_lookup = v == "1";
     } catch (...) {
@@ -134,7 +133,6 @@ bool PlayerSettings::Save(const fs::path& dir) const {
   out << "# dekp23 custom music player settings\n"
       << "enabled=" << (enabled ? 1 : 0) << "\n"
       << "toasts=" << (toasts ? 1 : 0) << "\n"
-      << "fill=" << (fill_repeat ? "repeat" : "original") << "\n"
       << "volume=" << volume_percent << "\n"
       << "lookup=" << (online_lookup ? 1 : 0) << "\n";
   return static_cast<bool>(out);

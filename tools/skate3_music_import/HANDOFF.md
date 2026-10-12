@@ -82,7 +82,7 @@ Toolchain on the laptop: LLVM 23.1.3, CMake 4.4.4, Ninja, VS 2026 Build Tools, P
       originals once with the Python tool + vgmstream (simple), or decode in-process with the
       runtime's FFmpeg XMA decoder (check what rexruntime.dll exports).
 
-### Phase 1 - our playlist drives the music (code done 2026-10-12, needs in-game test)
+### Phase 1 - our playlist drives the music: DONE, confirmed in game 2026-10-12 11:37
 - [x] In-game decode of the game's songs: SDK `rex::audio::XmaStreamDecoder` (SDK 5df62be)
       + `skate3_custom_music_mus` (MUS reader, index builder, segment join). No FLAC copy
       of the originals is stored; they are decoded from Ipod_Stream.mus while playing
@@ -99,9 +99,13 @@ Toolchain on the laptop: LLVM 23.1.3, CMake 4.4.4, Ninja, VS 2026 Build Tools, P
       (on/off, Play, up/down, bulk on/off). Saved to playlist.tsv. Toast shows the entry.
 - [x] Rebuild writes tracks.tsv (your tracks); per-slot assignment and length fitting are
       legacy (`fit_layout`), manifest.tsv optional.
-- [ ] In-game test: build 373ae46 (+SDK 5df62be). Check: decoder self-test line, "long
-      iPod slots active", music plays from the playlist, Next/Prev, in-game song pick ->
-      next entry, toast titles.
+- [x] In-game test (game a0d53cd, SDK 77d570a; logs skate3_006/007): user imported 5 tracks
+      from F7 "seamlessly" (5 x opus webm/mkv, 202-342 s, ~2 s each); decoder self-test
+      820/820 frames; carrier layout loaded ("long iPod slots active", slot 45 = 1198 s;
+      1 slot start in 8 min); game songs decode in 0.3-1.1 s. XmaContext "exceeds buffer"
+      and "XMA Frame sizing" errors are pre-existing (also in logs before these changes).
+      Note: the first Rescan removed the two tracks made by the old Python prepare (they
+      were never in tracks/), as designed.
 - [x] Your tracks convert in-game (user chose: extend the runtime's FFmpeg). SDK ac48976:
       libavformat + libswresample + aac/opus/vorbis/flac/alac/pcm/mp2/wmav1 decoders and
       matroska/mov/ogg/flac/wav/aiff/aac/w64 demuxers via an overlay config (FFmpeg

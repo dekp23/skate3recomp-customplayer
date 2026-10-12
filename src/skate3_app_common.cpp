@@ -793,7 +793,22 @@ void Skate3BaseApp::OnPostSetup() {
   }
   InstallDlcPackages();
   InstallRecipeOverlay();
-  skate3::custom_music::Install(runtime()->game_data_root());
+  if (const auto music_overlay = skate3::custom_music::Install(runtime()->game_data_root());
+      !music_overlay.empty() && runtime()->file_system()) {
+    // Song-length layout: serve <library>/game_music (hard links + rewritten ipod.mpf)
+    // in place of the game's music folder. The original files are not modified.
+    auto device = std::make_unique<rex::filesystem::HostPathDevice>("skate3music:",
+                                                                     music_overlay, true);
+    if (device->Initialize()) {
+      runtime()->file_system()->RegisterDevice(std::move(device));
+      runtime()->file_system()->RegisterSymbolicLink(skate3::custom_music::kGuestMusicPath,
+                                                     "skate3music:");
+      REXLOG_INFO("custom music: music folder overlay mounted from {}",
+                  music_overlay.string());
+    } else {
+      REXLOG_WARN("custom music: could not mount music overlay {}", music_overlay.string());
+    }
+  }
 
   // Register retail multi-entry-function alternate entries.
 #if !SKATE3_HAS_TITLE_UPDATE

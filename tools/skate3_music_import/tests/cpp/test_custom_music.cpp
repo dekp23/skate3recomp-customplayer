@@ -5,7 +5,7 @@
 //       tools/skate3_music_import/tests/cpp/test_custom_music.cpp -o test_custom_music
 // Run:
 //   ./test_custom_music                       unit tests only
-//   ./test_custom_music CUSTOM_DIR SIM.bin    + end-to-end replay of real packets
+//   ./test_custom_music CUSTOM_DIR SIM.bin [CHAINS.txt]  + end-to-end replay of real packets
 //     CUSTOM_DIR: output of `skate3_music_import.py prepare`
 //     SIM.bin:    output of tests/sim_stream.py
 #include "skate3_custom_music.h"
@@ -67,8 +67,24 @@ static Manifest ReadManifest(const std::string& dir) {
   return m;
 }
 
-static int RunReplay(const std::string& dir, const std::string& sim_path) {
+static int RunReplay(const std::string& dir, const std::string& sim_path,
+                     const std::string& chains_path) {
   Engine e;
+  if (!chains_path.empty()) {
+    // Lines "song:seg,seg,..."
+    std::vector<std::vector<uint16_t>> chains(64);
+    std::ifstream cf(chains_path);
+    std::string cl;
+    while (std::getline(cf, cl)) {
+      const auto colon = cl.find(':');
+      if (colon == std::string::npos) continue;
+      const int song = std::stoi(cl.substr(0, colon));
+      std::stringstream ss(cl.substr(colon + 1));
+      std::string tok;
+      while (std::getline(ss, tok, ',')) chains[song].push_back(static_cast<uint16_t>(std::stoi(tok)));
+    }
+    e.SetChains(chains);
+  }
   std::vector<std::string> logs;
   CHECK(e.Load(dir, [&](LogLevel, const std::string& s) { logs.push_back(s); std::cout << s << "\n"; }),
         "engine load");
@@ -138,7 +154,7 @@ static int RunReplay(const std::string& dir, const std::string& sim_path) {
 int main(int argc, char** argv) {
   TestFingerprintMatchesPython();
   TestMissingFolderIsInert();
-  if (argc >= 3) RunReplay(argv[1], argv[2]);
+  if (argc >= 3) RunReplay(argv[1], argv[2], argc >= 4 ? argv[3] : "");
   if (g_failures) {
     std::cerr << g_failures << " check(s) failed\n";
     return 1;

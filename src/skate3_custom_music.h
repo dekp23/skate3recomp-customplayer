@@ -30,7 +30,7 @@ namespace skate3::custom_music {
 constexpr uint32_t kFingerprintSkip = 4;    // skip XMA packet header
 constexpr uint32_t kFingerprintLength = 256;
 constexpr uint32_t kSamplesPerFrame = 512;  // per channel, matches XmaContext
-constexpr uint32_t kIndexVersion = 3;
+constexpr uint32_t kIndexVersion = 4;
 constexpr double kSampleRate = 44100.0;
 
 // UTF-8 <-> path conversion that works in C++17 and C++20+ (char8_t).
@@ -90,6 +90,14 @@ class Engine {
   std::vector<uint32_t> song_samples() const;
   std::vector<SlotInfo> Slots() const;
 
+  // Segment play order per song slot ("chain"), e.g. from a rewritten ipod.mpf: a slot
+  // can repeat its own segments (longer) or stop early (shorter). Segment indices are
+  // within the song. Empty or invalid chains fall back to the original order. Persists
+  // across Load() calls.
+  void SetChains(std::vector<std::vector<uint16_t>> chains);
+  std::vector<std::vector<uint32_t>> segment_samples() const;
+  std::vector<std::vector<uint16_t>> chains() const;
+
   // Runtime controls (thread-safe).
   void SetEnabled(bool enabled) { enabled_.store(enabled, std::memory_order_relaxed); }
   bool enabled() const { return enabled_.load(std::memory_order_relaxed); }
@@ -118,25 +126,37 @@ class Engine {
  private:
   struct IndexEntry {
     uint64_t hash;
-    uint32_t song;
-    int32_t frame0_pos;  // song position of the first frame beginning in the packet
+    uint16_t song;
+    uint16_t segment;  // within the song
+    int32_t offset;    // first frame of the packet, relative to its segment's start
   };
   struct Slot;
   struct ContextState {
     int32_t song = -1;
+    int32_t chain_index = -1;  // occurrence of the current segment in the song's chain
     int64_t next_pos = 0;
     uint32_t unmatched_frames = 0;
+  };
+  struct SongLayout {
+    std::vector<uint32_t> segment_samples;   // original segments of the song
+    std::vector<uint16_t> chain;             // play order (segment indices)
+    std::vector<int64_t> timeline;           // start of each chain entry in the slot
+    int64_t length = 0;                      // total slot length in samples
+    int32_t last_started = -1;               // most recently started chain entry
   };
 
   const IndexEntry* Lookup(uint64_t hash) const;
   bool ReadPcm(Slot& slot, int64_t pos, int16_t* out_stereo);
+  int32_t ResolveChainIndex(ContextState& st, SongLayout& song, uint16_t segment);
+  static void ApplyChain(SongLayout& song, const std::vector<uint16_t>* chain);
 
   std::atomic<bool> loaded_{false};
   std::atomic<bool> enabled_{true};
   std::atomic<float> gain_{1.0f};
   std::filesystem::path dir_;
   std::vector<IndexEntry> index_;
-  std::vector<uint32_t> song_samples_;
+  std::vector<SongLayout> songs_;
+  std::vector<std::vector<uint16_t>> chains_override_;
   std::vector<std::unique_ptr<Slot>> slots_;  // by song index; null = not assigned
   std::unordered_map<uint32_t, ContextState> contexts_;
   Stats stats_;

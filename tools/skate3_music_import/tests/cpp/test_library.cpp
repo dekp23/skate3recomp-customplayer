@@ -8,11 +8,14 @@
 //   INDEX.s3fp:   a real index (from `skate3_music_import.py index`)
 #include "skate3_custom_music.h"
 #include "skate3_custom_music_library.h"
+#include "skate3_custom_music_mpf.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -171,11 +174,87 @@ static void TestNowPlayingAndGain(const fs::path& custom_dir, const fs::path& si
   CHECK(!e.OnFrame(1, pkt.data(), 0, 2, c), "disabled engine passes through");
 }
 
+static void TestFlexible(const fs::path& index, const fs::path& game_music, const fs::path& work) {
+  const auto segs = library::ReadIndexSegments(index);
+  CHECK(segs.size() == 46, "segments from index");
+  auto length_of = [&](size_t slot, const std::vector<uint16_t>& chain) {
+    int64_t t = 0;
+    for (uint16_t k : chain) t += segs[slot][k];
+    return t;
+  };
+  auto check_fit = [&](const library::FlexibleAssignment& a, const std::vector<int64_t>& tracks,
+                       const char* what) {
+    size_t extra = 0, bad = 0, filled = 0;
+    for (size_t s = 0; s < a.track_for_slot.size(); ++s) {
+      if (a.track_for_slot[s] < 0) continue;
+      ++filled;
+      const auto& chain = a.chains[s];
+      const int64_t len = length_of(s, chain);
+      const int64_t t = tracks[static_cast<size_t>(a.track_for_slot[s])];
+      const uint32_t max_seg = *std::max_element(segs[s].begin(), segs[s].end());
+      if (len < t || len - t >= static_cast<int64_t>(max_seg)) ++bad;
+      if (chain.empty() || chain[0] != 0) ++bad;
+      if (chain.size() > segs[s].size()) extra += chain.size() - segs[s].size();
+    }
+    std::cout << what << ": filled=" << filled << " bad_fits=" << bad << " extra_nodes=" << extra << "\n";
+    CHECK(bad == 0, what << ": every slot covers its track with < 1 segment of silence");
+    CHECK(extra <= library::kMaxExtraNodes, what << ": node budget");
+    return filled;
+  };
+  const std::vector<int64_t> few = {44100 * 7 * 60, 44100 * 5 * 60, 44100 * 200};
+  CHECK(check_fit(library::AssignFlexible(segs, few, true), few, "3 tracks, repeat") == 46,
+        "repeat fills all 46");
+  CHECK(check_fit(library::AssignFlexible(segs, few, false), few, "3 tracks, original") == 3,
+        "original keeps 43 game songs");
+  const std::vector<int64_t> huge = {44100LL * 30 * 60};
+  check_fit(library::AssignFlexible(segs, huge, false), huge, "30-minute track");
+
+  // Worst case for the node budget: 46 twenty-minute tracks. Fits are capped, so only
+  // check the budget and that the rewritten file stays valid.
+  std::vector<int64_t> many(46, 44100LL * 20 * 60);
+  const auto big = library::AssignFlexible(segs, many, true);
+  size_t extra = 0;
+  for (size_t s = 0; s < 46; ++s) extra += big.chains[s].size() > segs[s].size() ? big.chains[s].size() - segs[s].size() : 0;
+  std::cout << "46 x 20 min: extra_nodes=" << extra << "\n";
+  CHECK(extra <= library::kMaxExtraNodes, "budget respected under worst case");
+  std::ifstream mf(game_music / "ipod.mpf", std::ios::binary);
+  std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(mf)), {});
+  mpf::Graph g;
+  std::string err;
+  CHECK(mpf::Parse(bytes, &g, &err), "parse game ipod.mpf: " << err);
+  std::vector<uint32_t> per_song;
+  for (const auto& sg : segs) per_song.push_back(static_cast<uint32_t>(sg.size()));
+  std::vector<uint8_t> out;
+  CHECK(mpf::WriteWithChains(g, per_song, big.chains, &out, &err), "worst-case rewrite: " << err);
+  std::cout << "worst-case ipod.mpf: " << out.size() << " bytes\n";
+
+  // Full rebuild with song-length fitting writes ipod_layout.mpf matching the chains.
+  library::Options opt;
+  opt.ffmpeg = library::FindFfmpeg({});
+  opt.game_music_dir = game_music;
+  const auto r = library::Rebuild(work, opt, nullptr, nullptr);
+  CHECK(r.ok && r.layout_written, "rebuild writes layout: " << r.message);
+  std::ifstream lf(work / library::kLayoutFileName, std::ios::binary);
+  std::vector<uint8_t> lb((std::istreambuf_iterator<char>(lf)), {});
+  mpf::Graph lg;
+  std::vector<mpf::SongChain> lc;
+  CHECK(mpf::Parse(lb, &lg, &err) && mpf::ReadChains(lg, per_song, &lc, &err), "layout parses: " << err);
+  bool same = lc.size() == 46;
+  for (size_t s = 0; same && s < 46; ++s) {
+    const auto want = r.chains[s].empty() ? std::vector<uint16_t>() : r.chains[s];
+    if (!want.empty()) same = lc[s].segments == want;
+  }
+  CHECK(same, "layout chains equal the assignment");
+  Engine e;
+  CHECK(e.Load(work, nullptr), "engine loads after flexible rebuild");
+}
+
 int main(int argc, char** argv) {
   TestCleanTitle();
   if (argc >= 2) TestAssignMatchesPython(argv[1]);
   if (argc >= 4) TestRebuildAndReload(argv[2], argv[3]);
   if (argc >= 6) TestNowPlayingAndGain(argv[4], argv[5]);
+  if (argc >= 8) TestFlexible(argv[3], argv[6], argv[7]);
   if (g_fail) {
     std::cerr << g_fail << " check(s) failed\n";
     return 1;

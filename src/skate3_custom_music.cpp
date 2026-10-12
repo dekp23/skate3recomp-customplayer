@@ -94,7 +94,7 @@ size_t Engine::num_assigned() const {
 
 size_t Engine::num_songs() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return song_samples_.size();
+  return songs_.size();
 }
 
 std::filesystem::path Engine::dir() const {
@@ -104,15 +104,63 @@ std::filesystem::path Engine::dir() const {
 
 std::vector<uint32_t> Engine::song_samples() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return song_samples_;
+  std::vector<uint32_t> out;
+  for (const auto& s : songs_) out.push_back(static_cast<uint32_t>(s.length));
+  return out;
+}
+
+std::vector<std::vector<uint32_t>> Engine::segment_samples() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<std::vector<uint32_t>> out;
+  for (const auto& s : songs_) out.push_back(s.segment_samples);
+  return out;
+}
+
+std::vector<std::vector<uint16_t>> Engine::chains() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<std::vector<uint16_t>> out;
+  for (const auto& s : songs_) out.push_back(s.chain);
+  return out;
+}
+
+void Engine::ApplyChain(SongLayout& song, const std::vector<uint16_t>* chain) {
+  bool valid = chain && !chain->empty();
+  if (valid) {
+    for (uint16_t seg : *chain) valid = valid && seg < song.segment_samples.size();
+  }
+  song.chain.clear();
+  if (valid) {
+    song.chain = *chain;
+  } else {
+    for (size_t k = 0; k < song.segment_samples.size(); ++k) {
+      song.chain.push_back(static_cast<uint16_t>(k));
+    }
+  }
+  song.timeline.clear();
+  int64_t t = 0;
+  for (uint16_t seg : song.chain) {
+    song.timeline.push_back(t);
+    t += song.segment_samples[seg];
+  }
+  song.length = t;
+  song.last_started = -1;
+}
+
+void Engine::SetChains(std::vector<std::vector<uint16_t>> chains) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  chains_override_ = std::move(chains);
+  for (size_t i = 0; i < songs_.size(); ++i) {
+    ApplyChain(songs_[i], i < chains_override_.size() ? &chains_override_[i] : nullptr);
+  }
+  contexts_.clear();
 }
 
 std::vector<SlotInfo> Engine::Slots() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  std::vector<SlotInfo> out(song_samples_.size());
+  std::vector<SlotInfo> out(songs_.size());
   for (size_t i = 0; i < out.size(); ++i) {
     out[i].song = static_cast<uint32_t>(i);
-    out[i].song_seconds = song_samples_[i] / kSampleRate;
+    out[i].song_seconds = songs_[i].length / kSampleRate;
     if (i < slots_.size() && slots_[i]) {
       out[i].assigned = true;
       out[i].title = slots_[i]->title;
@@ -155,18 +203,26 @@ bool Engine::Load(const std::filesystem::path& dir, const LogFn& log) {
   if (num_songs == 0 || num_songs > 4096 || num_entries > 50'000'000) {
     return fail("implausible index sizes");
   }
-  std::vector<uint32_t> song_samples(num_songs);
-  for (auto& s : song_samples) {
-    if (!ReadLE(idx, &s)) return fail("truncated song table");
+  std::vector<SongLayout> songs(num_songs);
+  for (auto& s : songs) {
+    uint32_t nseg = 0;
+    if (!ReadLE(idx, &nseg) || nseg == 0 || nseg > 4096) return fail("bad song table");
+    s.segment_samples.resize(nseg);
+    for (auto& v : s.segment_samples) {
+      if (!ReadLE(idx, &v)) return fail("truncated song table");
+    }
   }
   std::vector<IndexEntry> index(num_entries);
   for (auto& e : index) {
-    uint32_t pos_bits = 0;
-    if (!ReadLE(idx, &e.hash) || !ReadLE(idx, &e.song) || !ReadLE(idx, &pos_bits)) {
+    uint32_t off_bits = 0;
+    if (!ReadLE(idx, &e.hash) || !ReadLE(idx, &e.song) || !ReadLE(idx, &e.segment) ||
+        !ReadLE(idx, &off_bits)) {
       return fail("truncated index entries");
     }
-    e.frame0_pos = static_cast<int32_t>(pos_bits);
-    if (e.song >= num_songs) return fail("index entry references unknown song");
+    e.offset = static_cast<int32_t>(off_bits);
+    if (e.song >= num_songs || e.segment >= songs[e.song].segment_samples.size()) {
+      return fail("index entry references unknown song/segment");
+    }
   }
   if (!std::is_sorted(index.begin(), index.end(),
                       [](const IndexEntry& a, const IndexEntry& b) { return a.hash < b.hash; })) {
@@ -224,7 +280,10 @@ bool Engine::Load(const std::filesystem::path& dir, const LogFn& log) {
     std::lock_guard<std::mutex> lock(mutex_);
     dir_ = dir;
     index_.swap(index);
-    song_samples_.swap(song_samples);
+    for (size_t i = 0; i < songs.size(); ++i) {
+      ApplyChain(songs[i], i < chains_override_.size() ? &chains_override_[i] : nullptr);
+    }
+    songs_.swap(songs);
     slots_.swap(slots);
     contexts_.clear();
     last_song_ = -1;
@@ -297,16 +356,19 @@ bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index
   int64_t pos;
   if (hit) {
     ++stats_.frames_matched;
-    // Exact: decoded frame k of a packet plays at frame0_pos + k * 512. frame_index -1 is
-    // a frame that began in the previous packet. Samples the game trims (decoder delay at
-    // segment start, overrun at segment end) map outside [segment start, end) and are
-    // discarded by the game, so the audible stream stays contiguous.
-    pos = static_cast<int64_t>(hit->frame0_pos) +
+    SongLayout& song = songs_[hit->song];
+    const int32_t j = ResolveChainIndex(st, song, hit->segment);
+    // Exact: decoded frame k of a packet plays at offset + k * 512 within its segment;
+    // frame_index -1 is a frame that began in the previous packet. Samples the game trims
+    // (decoder delay at segment start, overrun at segment end) map outside the segment
+    // and are discarded by the game, so the audible stream stays contiguous.
+    pos = song.timeline[static_cast<size_t>(j)] + static_cast<int64_t>(hit->offset) +
           static_cast<int64_t>(frame_index) * kSamplesPerFrame;
     if (st.song != static_cast<int32_t>(hit->song) || pos != st.next_pos) {
       ++stats_.resyncs;
     }
     st.song = static_cast<int32_t>(hit->song);
+    st.chain_index = j;
     st.unmatched_frames = 0;
   } else if (st.song >= 0 && st.unmatched_frames < kMaxBridgeFrames) {
     ++st.unmatched_frames;
@@ -353,6 +415,37 @@ bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index
   return true;
 }
 
+int32_t Engine::ResolveChainIndex(ContextState& st, SongLayout& song, uint16_t segment) {
+  const auto& chain = song.chain;
+  const int32_t n = static_cast<int32_t>(chain.size());
+  // Same segment still decoding on this context.
+  if (st.song >= 0 && &songs_[static_cast<size_t>(st.song)] == &song && st.chain_index >= 0 &&
+      st.chain_index < n && chain[static_cast<size_t>(st.chain_index)] == segment) {
+    return st.chain_index;
+  }
+  // A new segment starts: the next occurrence after the most recently started entry (a
+  // prefetching second context starts segments in chain order too).
+  for (int32_t j = song.last_started + 1; j < n; ++j) {
+    if (chain[static_cast<size_t>(j)] == segment) {
+      song.last_started = j;
+      return j;
+    }
+  }
+  // Song (re)started, or played out of the expected order: first occurrence.
+  for (int32_t j = 0; j < n; ++j) {
+    if (chain[static_cast<size_t>(j)] == segment) {
+      song.last_started = j;
+      return j;
+    }
+  }
+  // Segment not in this slot's chain (e.g. a short-version section): original position.
+  song.last_started = -1;
+  int32_t j = 0;
+  for (; j < n && chain[static_cast<size_t>(j)] < segment; ++j) {
+  }
+  return std::min(j, n - 1);
+}
+
 void Engine::ResetContext(uint32_t context_id) {
   std::lock_guard<std::mutex> lock(mutex_);
   contexts_.erase(context_id);
@@ -362,14 +455,14 @@ NowPlaying Engine::GetNowPlaying(Clock::time_point now, Clock::duration window) 
   std::lock_guard<std::mutex> lock(mutex_);
   NowPlaying np;
   np.serial = serial_;
-  if (last_song_ < 0 || static_cast<size_t>(last_song_) >= song_samples_.size() ||
+  if (last_song_ < 0 || static_cast<size_t>(last_song_) >= songs_.size() ||
       now - last_time_ > window) {
     return np;
   }
   np.active = true;
   np.song = static_cast<uint32_t>(last_song_);
   np.position_seconds = std::max<int64_t>(0, last_pos_) / kSampleRate;
-  np.slot_seconds = song_samples_[np.song] / kSampleRate;
+  np.slot_seconds = songs_[np.song].length / kSampleRate;
   if (const Slot* slot = slots_[np.song].get(); slot && enabled()) {
     np.replaced = true;
     np.title = slot->title;

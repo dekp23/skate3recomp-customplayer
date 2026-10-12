@@ -32,6 +32,8 @@ struct PlayerSettings {
 // Shared between the toast and the menu.
 struct UiState {
   std::filesystem::path library_dir;
+  std::filesystem::path game_music_dir;  // original game music folder (read only)
+  bool layout_active = false;            // a song-length layout was mounted at startup
   PlayerSettings settings;
   std::mutex mutex;
 };
@@ -81,6 +83,7 @@ class CustomMusicMenu final : public rex::ui::ImGuiDialog {
   std::string job_status_;
   bool job_error_ = false;
   float job_progress_ = -1.0f;
+  bool restart_needed_ = false;
 };
 
 }  // namespace skate3::custom_music

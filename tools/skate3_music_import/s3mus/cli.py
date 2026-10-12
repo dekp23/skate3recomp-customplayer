@@ -279,8 +279,8 @@ def _build_ipod_index(mpf_path: Path, mus_override: Optional[Path], out: Path, q
     mus_bytes = mus_path.read_bytes()
     mpf = parse_mpf(mpf_path.read_bytes())
     mus = parse_mus(mus_bytes, mpf.minor, mpf.endian, walk_streams=False)
-    entries, songs, st = build_index(mus_bytes, mus)
-    write_index(out, entries, songs)
+    entries, songs, by_song, st = build_index(mus_bytes, mus)
+    write_index(out, entries, by_song)
     if not quiet:
         print(f"index: {st.segments} segments -> {st.songs} songs, {st.packets} packets, "
               f"{len(entries)} fingerprints ({st.dup_hashes} duplicate, {st.short_packets} too short), "

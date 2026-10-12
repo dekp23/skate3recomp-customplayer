@@ -250,11 +250,12 @@ void CustomMusicMenu::StartJob(Job job) {
 }
 
 void CustomMusicMenu::RunJob(Job job) {
-  fs::path dir;
+  fs::path dir, game_music;
   PlayerSettings settings;
   {
     std::lock_guard<std::mutex> lock(GlobalUiState().mutex);
     dir = GlobalUiState().library_dir;
+    game_music = GlobalUiState().game_music_dir;
     settings = GlobalUiState().settings;
   }
   const fs::path tracks = dir / library::kTracksDirName;
@@ -281,6 +282,7 @@ void CustomMusicMenu::RunJob(Job job) {
   library::Options opt;
   opt.ffmpeg = library::FindFfmpeg({});
   opt.fill_repeat = settings.fill_repeat;
+  opt.game_music_dir = game_music;
   const auto result = library::Rebuild(
       dir, opt,
       [this](size_t done, size_t total, const std::string& current) {
@@ -306,6 +308,19 @@ void CustomMusicMenu::RunJob(Job job) {
   if (result.failed) msg += ", " + std::to_string(result.failed) + " failed";
   if (pruned) msg += ", " + std::to_string(pruned) + " old file(s) removed";
   msg += ")";
+  if (result.layout_written) {
+    // Song lengths are read by the game at startup; compare with what is running.
+    const auto running = GlobalEngine().chains();
+    bool same = running.size() == result.chains.size();
+    for (size_t i = 0; same && i < running.size(); ++i) {
+      same = result.chains[i].empty() || running[i] == result.chains[i];
+    }
+    if (!same) {
+      msg += "\nNew song lengths take effect after restarting Skate 3.";
+      std::lock_guard<std::mutex> lock(job_mutex_);
+      restart_needed_ = true;
+    }
+  }
   if (!result.errors.empty()) msg += "\n" + result.errors.front();
   SetStatus(msg, result.failed > 0 || !loaded);
   {
@@ -438,6 +453,20 @@ void CustomMusicMenu::OnDraw(ImGuiIO& io) {
   }
   ImGui::TextColored(kMuted, "Tracks folder: %s",
                      PathToUtf8(dir / library::kTracksDirName).c_str());
+  bool layout_active;
+  {
+    std::lock_guard<std::mutex> lock(GlobalUiState().mutex);
+    layout_active = GlobalUiState().layout_active;
+  }
+  ImGui::TextColored(layout_active ? kGood : kMuted, "Song lengths: %s",
+                     layout_active ? "fitted to your tracks"
+                                   : "original (Rebuild, then restart, to fit them)");
+  {
+    std::lock_guard<std::mutex> lock(job_mutex_);
+    if (restart_needed_) {
+      ImGui::TextColored(kWarn, "Restart Skate 3 to apply the new song lengths.");
+    }
+  }
 
   // ---- slot table
   ImGui::Spacing();

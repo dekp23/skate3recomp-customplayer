@@ -11,6 +11,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -24,10 +25,35 @@ constexpr const char* kTracksDirName = "tracks";
 struct Options {
   std::filesystem::path ffmpeg;
   bool fill_repeat = true;  // reuse tracks for leftover slots; false keeps the game's songs
+  // Song-length fitting: the original game music folder (read only, for ipod.mpf). When
+  // set, slots are lengthened/shortened to each track and <library>/ipod_layout.mpf is
+  // written; it takes effect the next time the game starts.
+  std::filesystem::path game_music_dir;
 };
+
+constexpr const char* kLayoutFileName = "ipod_layout.mpf";
+// Rewritten ipod.mpf node budget: node offsets are 16-bit word offsets (256 KiB).
+constexpr size_t kMaxExtraNodes = 8000;
+
+struct FlexibleAssignment {
+  std::vector<int> track_for_slot;               // -1 = original game song
+  std::vector<std::vector<uint16_t>> chains;     // empty = original chain
+};
+
+// Play order covering n segments of a song with `segments` segments: 0..n-1, extended by
+// repeating segments 1..segments-1 (segment 0 is never repeated, so a restart of the song
+// stays unambiguous at runtime).
+std::vector<uint16_t> ChainOfLength(size_t segments, size_t n);
+// Length-fitting assignment: longest tracks first, each to the free slot whose segment
+// size leaves the least silence after the track; leftover slots per fill_repeat.
+FlexibleAssignment AssignFlexible(const std::vector<std::vector<uint32_t>>& segments_by_song,
+                                  const std::vector<int64_t>& track_samples, bool fill_repeat,
+                                  size_t max_extra_nodes = kMaxExtraNodes);
 
 struct BuildResult {
   bool ok = false;
+  bool layout_written = false;                 // ipod_layout.mpf (re)written
+  std::vector<std::vector<uint16_t>> chains;   // per slot, as written (empty = original)
   std::string message;
   size_t tracks = 0;
   size_t converted = 0;
@@ -53,6 +79,8 @@ int64_t ConvertToPcm(const std::filesystem::path& ffmpeg, const std::filesystem:
 // Returns, per slot, the index into track_samples or -1.
 std::vector<int> Assign(const std::vector<uint32_t>& song_samples,
                         const std::vector<int64_t>& track_samples, bool fill_repeat);
+// Per-song segment lengths from an ipod.s3fp index (v4). Empty on error.
+std::vector<std::vector<uint32_t>> ReadIndexSegments(const std::filesystem::path& index_file);
 // Song lengths from an ipod.s3fp index. Empty on error.
 std::vector<uint32_t> ReadIndexSongSamples(const std::filesystem::path& index_file);
 // Copies files into tracks_dir (existing names are skipped). Returns files copied.

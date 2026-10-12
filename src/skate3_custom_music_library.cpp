@@ -1,12 +1,14 @@
 #include "skate3_custom_music_library.h"
 
 #include "skate3_custom_music.h"
+#include "skate3_custom_music_mpf.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <sstream>
@@ -152,7 +154,8 @@ fs::path FindFfmpeg(const fs::path& configured) {
   if (SearchPathW(nullptr, L"ffmpeg.exe", nullptr, MAX_PATH, buf, nullptr) > 0) return fs::path(buf);
   // winget installs: command-line alias links, or the package folder itself (the game
   // may have been started before winget updated PATH).
-  if (const wchar_t* local = _wgetenv(L"LOCALAPPDATA")) {
+  wchar_t local[MAX_PATH];
+  if (GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH) > 0) {
     const fs::path base = fs::path(local) / "Microsoft" / "WinGet";
     const fs::path link = base / "Links" / "ffmpeg.exe";
     if (fs::exists(link, ec)) return link;
@@ -264,22 +267,140 @@ std::vector<int> Assign(const std::vector<uint32_t>& song_samples,
   return out;
 }
 
-std::vector<uint32_t> ReadIndexSongSamples(const fs::path& index_file) {
+std::vector<uint16_t> ChainOfLength(size_t segments, size_t n) {
+  std::vector<uint16_t> chain;
+  if (segments == 0 || n == 0) return chain;
+  for (size_t k = 0; k < std::min(n, segments); ++k) chain.push_back(static_cast<uint16_t>(k));
+  size_t next = 1;
+  while (chain.size() < n) {
+    if (segments == 1) {
+      chain.push_back(0);
+      continue;
+    }
+    chain.push_back(static_cast<uint16_t>(next));
+    next = next + 1 < segments ? next + 1 : 1;
+  }
+  return chain;
+}
+
+namespace {
+struct Fit {
+  size_t n = 0;          // segments
+  int64_t length = 0;    // slot length with n segments
+};
+Fit FitTrack(const std::vector<uint32_t>& segs, int64_t track, size_t max_n) {
+  Fit f;
+  for (uint16_t k : ChainOfLength(segs.size(), max_n)) {
+    f.length += segs[k];
+    ++f.n;
+    if (f.length >= track) break;
+  }
+  return f;
+}
+}  // namespace
+
+FlexibleAssignment AssignFlexible(const std::vector<std::vector<uint32_t>>& segments_by_song,
+                                  const std::vector<int64_t>& track_samples, bool fill_repeat,
+                                  size_t max_extra_nodes) {
+  const size_t slots = segments_by_song.size();
+  FlexibleAssignment a;
+  a.track_for_slot.assign(slots, -1);
+  a.chains.assign(slots, {});
+  std::vector<bool> free(slots, true);
+  size_t budget = max_extra_nodes;
+  // Per-slot cap so one long track cannot use the whole node budget.
+  const size_t per_slot_cap = 600;
+
+  auto place = [&](size_t slot, int track) {
+    const auto& segs = segments_by_song[slot];
+    const size_t cap = std::min(per_slot_cap, segs.size() + budget);
+    const Fit fit = FitTrack(segs, track_samples[static_cast<size_t>(track)], cap);
+    a.track_for_slot[slot] = track;
+    a.chains[slot] = ChainOfLength(segs.size(), fit.n);
+    if (fit.n > segs.size()) budget -= fit.n - segs.size();
+    free[slot] = false;
+  };
+  auto best_slot = [&](int track) -> int {
+    int best = -1;
+    int64_t best_pad = 0;
+    for (size_t s = 0; s < slots; ++s) {
+      if (!free[s]) continue;
+      const auto& segs = segments_by_song[s];
+      const size_t cap = std::min(per_slot_cap, segs.size() + budget);
+      const Fit fit = FitTrack(segs, track_samples[static_cast<size_t>(track)], cap);
+      // Truncation (cap reached) counts as heavily penalised padding.
+      const int64_t t = track_samples[static_cast<size_t>(track)];
+      const int64_t pad = fit.length >= t ? fit.length - t : (t - fit.length) * 4;
+      if (best < 0 || pad < best_pad) {
+        best = static_cast<int>(s);
+        best_pad = pad;
+      }
+    }
+    return best;
+  };
+
+  std::vector<int> order(track_samples.size());
+  for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int>(i);
+  std::stable_sort(order.begin(), order.end(),
+                   [&](int x, int y) { return track_samples[x] > track_samples[y]; });
+  for (int t : order) {
+    const int s = best_slot(t);
+    if (s < 0) break;
+    place(static_cast<size_t>(s), t);
+  }
+  if (fill_repeat && !order.empty()) {
+    for (size_t s = 0; s < slots; ++s) {
+      if (!free[s]) continue;
+      // Track that fits this slot with the least silence.
+      int best = -1;
+      int64_t best_pad = 0;
+      const auto& segs = segments_by_song[s];
+      for (int t : order) {
+        const size_t cap = std::min(per_slot_cap, segs.size() + budget);
+        const Fit fit = FitTrack(segs, track_samples[static_cast<size_t>(t)], cap);
+        const int64_t len = track_samples[static_cast<size_t>(t)];
+        const int64_t pad = fit.length >= len ? fit.length - len : (len - fit.length) * 4;
+        if (best < 0 || pad < best_pad) best = t, best_pad = pad;
+      }
+      place(s, best);
+    }
+  }
+  return a;
+}
+
+std::vector<std::vector<uint32_t>> ReadIndexSegments(const fs::path& index_file) {
   std::ifstream in(index_file, std::ios::binary);
+  auto u32 = [&](uint32_t* v) {
+    uint8_t b[4];
+    if (!in.read(reinterpret_cast<char*>(b), 4)) return false;
+    *v = b[0] | (b[1] << 8) | (b[2] << 16) | (static_cast<uint32_t>(b[3]) << 24);
+    return true;
+  };
   char magic[4];
   uint32_t hdr[5];
   if (!in.read(magic, 4) || std::memcmp(magic, "S3FP", 4) != 0) return {};
   for (auto& v : hdr) {
-    uint8_t b[4];
-    if (!in.read(reinterpret_cast<char*>(b), 4)) return {};
-    v = b[0] | (b[1] << 8) | (b[2] << 16) | (static_cast<uint32_t>(b[3]) << 24);
+    if (!u32(&v)) return {};
   }
   if (hdr[0] != kIndexVersion || hdr[3] == 0 || hdr[3] > 4096) return {};
-  std::vector<uint32_t> out(hdr[3]);
-  for (auto& v : out) {
-    uint8_t b[4];
-    if (!in.read(reinterpret_cast<char*>(b), 4)) return {};
-    v = b[0] | (b[1] << 8) | (b[2] << 16) | (static_cast<uint32_t>(b[3]) << 24);
+  std::vector<std::vector<uint32_t>> out(hdr[3]);
+  for (auto& song : out) {
+    uint32_t n = 0;
+    if (!u32(&n) || n == 0 || n > 4096) return {};
+    song.resize(n);
+    for (auto& v : song) {
+      if (!u32(&v)) return {};
+    }
+  }
+  return out;
+}
+
+std::vector<uint32_t> ReadIndexSongSamples(const fs::path& index_file) {
+  std::vector<uint32_t> out;
+  for (const auto& song : ReadIndexSegments(index_file)) {
+    uint64_t total = 0;
+    for (uint32_t v : song) total += v;
+    out.push_back(static_cast<uint32_t>(total));
   }
   return out;
 }
@@ -363,7 +484,32 @@ BuildResult Rebuild(const fs::path& library_dir, const Options& options,
 
   std::vector<int64_t> lens;
   for (const auto& b : built) lens.push_back(b.samples);
-  const auto assignment = Assign(songs, lens, options.fill_repeat);
+  std::vector<int> assignment;
+
+  // Song-length fitting needs the game's ipod.mpf to rewrite.
+  std::vector<uint8_t> layout;
+  if (!options.game_music_dir.empty()) {
+    std::ifstream mf(options.game_music_dir / "ipod.mpf", std::ios::binary);
+    std::vector<uint8_t> mpf_bytes((std::istreambuf_iterator<char>(mf)), {});
+    const auto segments = ReadIndexSegments(library_dir / "ipod.s3fp");
+    mpf::Graph graph;
+    std::string err;
+    if (!mpf_bytes.empty() && !segments.empty() && mpf::Parse(mpf_bytes, &graph, &err)) {
+      std::vector<uint32_t> per_song;
+      for (const auto& sg : segments) per_song.push_back(static_cast<uint32_t>(sg.size()));
+      const auto flex = AssignFlexible(segments, lens, options.fill_repeat);
+      if (mpf::WriteWithChains(graph, per_song, flex.chains, &layout, &err)) {
+        assignment = flex.track_for_slot;
+        r.chains = flex.chains;
+      } else {
+        r.errors.push_back("song-length layout: " + err);
+        layout.clear();
+      }
+    } else if (!err.empty()) {
+      r.errors.push_back("song-length layout: " + err);
+    }
+  }
+  if (assignment.empty()) assignment = Assign(songs, lens, options.fill_repeat);
 
   const fs::path manifest = library_dir / "manifest.tsv";
   const fs::path tmp = library_dir / "manifest.tsv.tmp";
@@ -383,6 +529,24 @@ BuildResult Rebuild(const fs::path& library_dir, const Options& options,
     }
   }
   std::error_code ec;
+  if (!layout.empty()) {
+    const fs::path ltmp = library_dir / (std::string(kLayoutFileName) + ".tmp");
+    {
+      std::ofstream lo(ltmp, std::ios::binary | std::ios::trunc);
+      lo.write(reinterpret_cast<const char*>(layout.data()),
+               static_cast<std::streamsize>(layout.size()));
+      if (!lo) {
+        r.message = "could not write " + std::string(kLayoutFileName);
+        return r;
+      }
+    }
+    fs::rename(ltmp, library_dir / kLayoutFileName, ec);
+    if (ec) {
+      r.message = "could not replace " + std::string(kLayoutFileName) + ": " + ec.message();
+      return r;
+    }
+    r.layout_written = true;
+  }
   fs::rename(tmp, manifest, ec);
   if (ec) {
     r.message = "could not replace manifest.tsv: " + ec.message();

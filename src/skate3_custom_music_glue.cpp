@@ -1,9 +1,13 @@
 #include "skate3_custom_music_glue.h"
 
 #include "skate3_custom_music.h"
+#include "skate3_custom_music_library.h"
+#include "skate3_custom_music_mpf.h"
 #include "skate3_custom_music_ui.h"
 
 #include <atomic>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string>
 
@@ -55,18 +59,76 @@ std::filesystem::path ResolveLibraryDir(const std::filesystem::path& game_data_r
   return beside_exe;  // where the in-game menu will create one
 }
 
-void Install(const std::filesystem::path& game_data_root) {
+namespace {
+
+// Builds <library>/game_music: hard links to the game's music files plus the song-length
+// layout as ipod.mpf. Returns that folder, or empty if no layout applies.
+std::filesystem::path PrepareMusicOverlay(const std::filesystem::path& library,
+                                          const std::filesystem::path& game_music) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path layout = library / library::kLayoutFileName;
+  if (!fs::is_regular_file(layout, ec) || !fs::is_directory(game_music, ec)) return {};
+
+  // Validate the layout and read its chains before touching anything.
+  std::ifstream lf(layout, std::ios::binary);
+  std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(lf)), {});
+  const auto segments = library::ReadIndexSegments(library / "ipod.s3fp");
+  std::vector<uint32_t> per_song;
+  for (const auto& sg : segments) per_song.push_back(static_cast<uint32_t>(sg.size()));
+  mpf::Graph graph;
+  std::vector<mpf::SongChain> chains;
+  std::string err;
+  if (segments.empty() || !mpf::Parse(bytes, &graph, &err) ||
+      !mpf::ReadChains(graph, per_song, &chains, &err)) {
+    REXLOG_WARN("custom music: ignoring {}: {}", PathToUtf8(layout), err);
+    return {};
+  }
+
+  const fs::path active = library / "game_music";
+  fs::create_directories(active, ec);
+  for (const auto& entry : fs::directory_iterator(game_music, ec)) {
+    if (!entry.is_regular_file(ec)) continue;
+    const fs::path name = entry.path().filename();
+    if (name == "ipod.mpf") continue;
+    const fs::path dst = active / name;
+    // Hard links share size and timestamps with the original; relink when they differ.
+    std::error_code e1, e2;
+    if (fs::exists(dst, e1) && fs::file_size(dst, e1) == fs::file_size(entry.path(), e2) &&
+        fs::last_write_time(dst, e1) == fs::last_write_time(entry.path(), e2)) {
+      continue;
+    }
+    fs::remove(dst, e1);
+    fs::create_hard_link(entry.path(), dst, e1);
+    if (e1) {
+      REXLOG_WARN("custom music: cannot hard-link {} ({}); song lengths stay original. "
+                  "The library and the game must be on the same drive.",
+                  PathToUtf8(name), e1.message());
+      return {};
+    }
+  }
+  fs::copy_file(layout, active / "ipod.mpf", fs::copy_options::overwrite_existing, ec);
+  if (ec) {
+    REXLOG_WARN("custom music: cannot stage ipod.mpf: {}", ec.message());
+    return {};
+  }
+  std::vector<std::vector<uint16_t>> chain_list;
+  for (const auto& c : chains) chain_list.push_back(c.segments);
+  GlobalEngine().SetChains(std::move(chain_list));
+  REXLOG_INFO("custom music: song-length layout active ({} nodes)", graph.num_nodes);
+  return active;
+}
+
+}  // namespace
+
+std::filesystem::path Install(const std::filesystem::path& game_data_root) {
   if (!REXCVAR_GET(skate3_custom_music)) {
     REXLOG_INFO("custom music: disabled by skate3_custom_music=false");
-    return;
+    return {};
   }
   const auto dir = ResolveLibraryDir(game_data_root);
+  const auto game_music = game_data_root / "data" / "audio" / "music";
   const auto settings = PlayerSettings::Load(dir);
-  {
-    std::lock_guard<std::mutex> lock(GlobalUiState().mutex);
-    GlobalUiState().library_dir = dir;
-    GlobalUiState().settings = settings;
-  }
   settings.ApplyTo(GlobalEngine());
   GlobalEngine().Load(dir, [](LogLevel level, const std::string& msg) {
     switch (level) {
@@ -81,6 +143,14 @@ void Install(const std::filesystem::path& game_data_root) {
         break;
     }
   });
+  const auto overlay = PrepareMusicOverlay(dir, game_music);
+  {
+    std::lock_guard<std::mutex> lock(GlobalUiState().mutex);
+    GlobalUiState().library_dir = dir;
+    GlobalUiState().game_music_dir = game_music;
+    GlobalUiState().layout_active = !overlay.empty();
+    GlobalUiState().settings = settings;
+  }
   REXLOG_INFO("custom music (dekp23): library {}, F7 opens the music menu", PathToUtf8(dir));
 
   // Installed even without a loaded library: the F7 menu can build/load one later.
@@ -89,6 +159,7 @@ void Install(const std::filesystem::path& game_data_root) {
   filter.on_context_reset = &OnContextReset;
   rex::audio::SetXmaFrameFilter(&filter);
   g_installed = true;
+  return overlay;
 }
 
 void Uninstall() {

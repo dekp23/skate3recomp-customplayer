@@ -216,8 +216,9 @@ try {
   if (-not (Test-Path $musicLink)) { New-Item -ItemType Junction -Path $musicLink -Target $MusicDir | Out-Null }
   Get-ChildItem $OutDir | ForEach-Object { Log "  $($_.Name)" }
 
-  # Release package for other players: the program files only (no game files, saves,
-  # settings or music). Extract anywhere, run skate3.exe, select the ISO, press F7.
+  # Local package of the program files (no game files, saves, settings or music), for moving
+  # your own setup to another PC of yours. skate3.exe is built from your copy of the game:
+  # do not share this package.
   $zip = Join-Path $Root 'Skate3Recomp-CustomMusic-Windows.zip'
   $stage = Join-Path $Root 'package'
   if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
@@ -228,7 +229,7 @@ try {
   Copy-Item (Join-Path $Repo 'docs\CUSTOM_MUSIC_SETUP.md') (Join-Path $stage 'CUSTOM_MUSIC_README.md') -Force
   if (Test-Path $zip) { Remove-Item $zip -Force }
   Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
-  Log "release package: $zip"
+  Log "local package (for your own use, do not share): $zip"
 
   Log "RESULT: SUCCESS -> $OutDir"
   Set-Content -Path $Status -Value "RESULT: SUCCESS $(Get-Date -Format 'HH:mm:ss') -> $OutDir" -Encoding UTF8

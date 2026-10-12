@@ -111,6 +111,9 @@ Game files are never modified.
   musicbrainz.org and coverartarchive.org, one request per second; results are cached.
 - The 46 game songs are listed as "Skate 3 song N" for now.
 
+Custom music is not offered as a download: you build it once on your PC from your own copy
+of the game with a one-click script (the release zips mentioned above are the official
+Skate3Recomp ones, without custom music).
 **Setup guide (one-time setup, usage, privacy, troubleshooting): [docs/CUSTOM_MUSIC_SETUP.md](docs/CUSTOM_MUSIC_SETUP.md).**
 How it works and developer notes: [tools/skate3_music_import](tools/skate3_music_import/README.md).
 

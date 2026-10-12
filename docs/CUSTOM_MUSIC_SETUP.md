@@ -4,28 +4,13 @@ Play your own music on the Skate 3 iPod, mixed with the game's 46 songs in one p
 You need your own legally obtained copy of Skate 3 (ISO), as for Skate3Recomp itself.
 Nothing here modifies your game files.
 
-There are two ways to get it. **Option A is the one-time setup for players.** Option B is
-for building it yourself from source.
+This fork is shared as **source code with a one-click build script**: you build
+`skate3.exe` on your own PC from your own copy of the game. No game files and no
+executable built from the game are distributed.
 
 ---
 
-## Option A: download the release (recommended)
-
-1. Download **Skate3Recomp-CustomMusic-Windows.zip** from the
-   [releases page](https://github.com/dekp23/skate3recomp-customplayer/releases).
-2. Extract it to a folder you control (for example `C:\Games\Skate3Recomp-CustomMusic`).
-   Keep everything in that one folder: the game files, your saves and your music all live
-   next to `skate3.exe`, so the folder can be moved or backed up as a whole.
-3. Run `skate3.exe`, click **Select ISO**, choose your Skate 3 ISO and wait for the files to
-   be extracted. Then **Start Game**.
-   (Already have Skate3Recomp installed? You can instead copy `skate3.exe` and the `.dll`
-   files from the zip into that folder; keep a backup of the originals.)
-4. In game, press **F7** to open the music menu. That's it.
-
-The first start with custom music takes a few extra seconds: the game builds its music
-index and the "long song slots" file from your game files (once).
-
-## Option B: build it yourself (Windows)
+## Setup (Windows, one time)
 
 Needs Windows 10/11 with **winget** ("App Installer" from the Microsoft Store), an
 internet connection, about **25 GB free on C:** and 20-40 minutes the first time.
@@ -45,9 +30,12 @@ internet connection, about **25 GB free on C:** and 20-40 minutes the first time
    - creates `C:\s3build\Skate3Recomp-CustomMusic`, which uses your existing game folder
      (linked, not copied) and **copies** your saves and settings once; your original
      install is only read,
-   - also writes `C:\s3build\Skate3Recomp-CustomMusic-Windows.zip`, the release package
-     for Option A.
-4. Run `C:\s3build\Skate3Recomp-CustomMusic\skate3.exe` and press **F7**.
+   - also writes `C:\s3build\Skate3Recomp-CustomMusic-Windows.zip`, a package of the
+     program files (no game files) for moving your own setup to another PC of yours. It
+     contains code built from your copy of the game: keep it for yourself, don't share it.
+4. Run `C:\s3build\Skate3Recomp-CustomMusic\skate3.exe` and press **F7**. The first start
+   with custom music takes a few extra seconds: the game builds its music index and the
+   "long song slots" file from your game files (once).
 
 To update later, run `run_build.cmd` again (close the game first). Rebuilds take ~10-15
 minutes. Your music, playlist and settings are kept.
@@ -96,11 +84,11 @@ Nothing else is sent.
 | F7 says "Not active" | The game files could not be read. Check that the game was installed (Select ISO) and see `logs\skate3_*.log` for lines starting with `custom music:`. |
 | A track does not convert | The status line names the file and the reason. Re-download it in another format (mp3/m4a/opus). |
 | Wrong or missing song info | Click **Look up now** to retry the ones not found. Tracks whose files carry tags (title + artist) use the tags. |
-| The game changes song by itself every few minutes | The long-slot file could not be set up, usually because `custom_music` is on a different drive than the game folder. Keep both in the same folder (Option A) or on the same drive. The log says `iPod slots keep their original length`. |
+| The game changes song by itself every few minutes | The long-slot file could not be set up, usually because `custom_music` is on a different drive than the game folder. Keep both on the same drive. The log says `iPod slots keep their original length`. |
 | You want a clean start | Close the game and delete the `custom_music` folder (your `tracks` are inside it: move them out first). It is rebuilt on the next start. |
 | Something else | Turn on the diagnostic log: start `skate3.exe --skate3_custom_music_trace` (or add the line `skate3_custom_music_trace = true` on its own line in `settings.toml`), play, and share `logs\skate3_*.log`. |
 
 ## Uninstall
 
-Delete the Skate3Recomp-CustomMusic folder (Option A: the whole folder you extracted;
-Option B: `C:\s3build`). Your original Skate3Recomp install is not touched by either option.
+Delete `C:\s3build` (and the `custom_music_build` folder you copied). Your original
+Skate3Recomp install is not touched.

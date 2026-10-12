@@ -1,5 +1,7 @@
 #include "skate3_custom_music_library.h"
 
+#include "skate3_custom_music_mus.h"
+
 #include "skate3_custom_music.h"
 #include "skate3_custom_music_mpf.h"
 
@@ -424,12 +426,41 @@ size_t ImportFiles(const std::vector<fs::path>& files, const fs::path& tracks_di
   return copied;
 }
 
+bool EnsureIndex(const fs::path& library_dir, const fs::path& game_music_dir,
+                 std::string* message) {
+  const fs::path index = library_dir / "ipod.s3fp";
+  if (!ReadIndexSongSamples(index).empty()) return true;
+  std::error_code ec;
+  fs::create_directories(library_dir, ec);
+  const fs::path mus_file = game_music_dir / "Ipod_Stream.mus";
+  if (game_music_dir.empty() || !fs::is_regular_file(mus_file, ec)) {
+    if (message) *message = "game file Ipod_Stream.mus not found";
+    return false;
+  }
+  mus::IndexBuildStats st;
+  std::string err;
+  if (!mus::BuildIndex(mus_file, index, &st, &err)) {
+    if (message) *message = "cannot build ipod.s3fp: " + err;
+    return false;
+  }
+  if (message) {
+    *message = "built ipod.s3fp from the game's music (" + std::to_string(st.unique) +
+               " fingerprints)";
+  }
+  return true;
+}
+
 BuildResult Rebuild(const fs::path& library_dir, const Options& options,
                     const ProgressFn& progress, const std::atomic<bool>* cancel) {
   BuildResult r;
+  std::string index_msg;
+  if (!EnsureIndex(library_dir, options.game_music_dir, &index_msg)) {
+    r.message = index_msg;
+    return r;
+  }
   const auto songs = ReadIndexSongSamples(library_dir / "ipod.s3fp");
   if (songs.empty()) {
-    r.message = "ipod.s3fp missing or invalid (run the prepare tool once)";
+    r.message = "ipod.s3fp invalid";
     return r;
   }
   if (options.ffmpeg.empty()) {

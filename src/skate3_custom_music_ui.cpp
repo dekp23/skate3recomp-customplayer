@@ -378,8 +378,8 @@ void CustomMusicMenu::OnDraw(ImGuiIO& io) {
   const size_t assigned = std::count_if(slots.begin(), slots.end(), [](auto& s) { return s.assigned; });
   if (!engine.loaded()) {
     ImGui::TextColored(kBad, "Not active: no music library loaded.");
-    ImGui::TextWrapped("Library folder: %s\nRun the prepare tool once (it creates ipod.s3fp), "
-                       "then use the buttons below.",
+    ImGui::TextWrapped("Library folder: %s\nAdd tracks or import your Music folder below to "
+                       "get started.",
                        PathToUtf8(dir).c_str());
   } else {
     ImGui::TextColored(settings.enabled ? kGood : kWarn, "%s",

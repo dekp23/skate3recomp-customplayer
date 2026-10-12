@@ -22,6 +22,12 @@ namespace skate3::custom_music::library {
 
 constexpr const char* kTracksDirName = "tracks";
 
+// Makes sure <library>/ipod.s3fp exists and is valid; builds it from the game's
+// <game_music_dir>/Ipod_Stream.mus if not (about a second). Creates the library folder.
+// Returns false with *message set if no index could be made.
+bool EnsureIndex(const std::filesystem::path& library_dir,
+                 const std::filesystem::path& game_music_dir, std::string* message);
+
 struct Options {
   std::filesystem::path ffmpeg;
   bool fill_repeat = true;  // reuse tracks for leftover slots; false keeps the game's songs

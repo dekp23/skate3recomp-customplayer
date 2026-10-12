@@ -3,9 +3,12 @@
 #include "skate3_custom_music.h"
 #include "skate3_custom_music_library.h"
 #include "skate3_custom_music_mpf.h"
+#include "skate3_custom_music_mus.h"
 #include "skate3_custom_music_ui.h"
 
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <fstream>
 #include <iterator>
@@ -14,6 +17,7 @@
 #include <thread>
 
 #include <rex/audio/xma/frame_filter.h>
+#include <rex/audio/xma/stream_decoder.h>
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
 #include <rex/logging.h>
@@ -74,6 +78,41 @@ class TraceLogger {
 };
 
 TraceLogger g_trace_logger;
+
+// Diagnostic: decodes the first iPod segment with the in-process XMA stream decoder and
+// logs the result (proves the runtime's decoder is reachable from the game module).
+void DecoderSelfTest(const std::filesystem::path& game_music) {
+  const auto t0 = std::chrono::steady_clock::now();
+  std::vector<mus::Segment> segs;
+  std::string err;
+  const auto mus_file = game_music / "Ipod_Stream.mus";
+  if (!mus::ReadTable(mus_file, &segs, &err) || segs.empty()) {
+    REXLOG_WARN("custom music: decoder self-test skipped: {}", err);
+    return;
+  }
+  std::ifstream in(mus_file, std::ios::binary);
+  std::vector<mus::Block> blocks;
+  if (!mus::ReadBlocks(in, segs[0], &blocks, &err)) {
+    REXLOG_WARN("custom music: decoder self-test: {}", err);
+    return;
+  }
+  const auto padded = mus::PadPackets(blocks);
+  rex::audio::XmaStreamDecoder dec;
+  if (!dec.Open(segs[0].sample_rate, segs[0].channels)) {
+    REXLOG_WARN("custom music: decoder self-test: XMA decoder unavailable");
+    return;
+  }
+  std::vector<int16_t> pcm;
+  const int frames = dec.DecodeStream(padded.data(), blocks.size(), &pcm);
+  double sum = 0;
+  for (int16_t v : pcm) sum += double(v) * v;
+  const double rms = pcm.empty() ? 0 : std::sqrt(sum / pcm.size());
+  const double ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  REXLOG_INFO("custom music: decoder self-test: segment 0 -> {} frames ({} expected), "
+              "rms {:.0f}, {:.1f} ms",
+              frames, (segs[0].num_samples + mus::LeadSamples(blocks) + 511) / 512, rms, ms);
+}
 std::atomic<bool> g_first_override_logged{false};
 
 bool OnFrame(void*, uint32_t context_id, const uint8_t* packet, int frame_index,
@@ -173,6 +212,15 @@ std::filesystem::path Install(const std::filesystem::path& game_data_root) {
   }
   const auto dir = ResolveLibraryDir(game_data_root);
   const auto game_music = game_data_root / "data" / "audio" / "music";
+  {
+    std::string msg;
+    const bool had_index = !library::ReadIndexSongSamples(dir / "ipod.s3fp").empty();
+    if (!library::EnsureIndex(dir, game_music, &msg)) {
+      REXLOG_WARN("custom music: {}", msg);
+    } else if (!had_index) {
+      REXLOG_INFO("custom music: {}", msg);
+    }
+  }
   const auto settings = PlayerSettings::Load(dir);
   settings.ApplyTo(GlobalEngine());
   GlobalEngine().Load(dir, [](LogLevel level, const std::string& msg) {
@@ -207,6 +255,7 @@ std::filesystem::path Install(const std::filesystem::path& game_data_root) {
     GlobalEngine().SetTraceEnabled(true);
     g_trace_logger.Start();
     REXLOG_INFO("custom music: playback trace on (MUSICTRACE lines; F10 writes a marker)");
+    std::thread([game_music] { DecoderSelfTest(game_music); }).detach();
   }
   g_installed = true;
   return overlay;

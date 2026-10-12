@@ -192,7 +192,7 @@ try {
   New-Item -ItemType Directory -Force -Path $OutDir, $MusicDir | Out-Null
   Copy-Item $exe.FullName $OutDir -Force
   Get-ChildItem -Path $exe.DirectoryName -Filter '*.dll' | Copy-Item -Destination $OutDir -Force
-  Copy-Item (Join-Path $Install 'portable.txt') $OutDir -Force
+  if (Test-Path (Join-Path $Install 'portable.txt')) { Copy-Item (Join-Path $Install 'portable.txt') $OutDir -Force }
   $gameLink = Join-Path $OutDir 'game'
   if (-not (Test-Path $gameLink)) { New-Item -ItemType Junction -Path $gameLink -Target $GameDir | Out-Null }
   $dlcSrc = Join-Path $Install 'dlc'
@@ -215,6 +215,20 @@ try {
   $musicLink = Join-Path $OutDir 'custom_music'
   if (-not (Test-Path $musicLink)) { New-Item -ItemType Junction -Path $musicLink -Target $MusicDir | Out-Null }
   Get-ChildItem $OutDir | ForEach-Object { Log "  $($_.Name)" }
+
+  # Release package for other players: the program files only (no game files, saves,
+  # settings or music). Extract anywhere, run skate3.exe, select the ISO, press F7.
+  $zip = Join-Path $Root 'Skate3Recomp-CustomMusic-Windows.zip'
+  $stage = Join-Path $Root 'package'
+  if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+  New-Item -ItemType Directory -Force -Path $stage | Out-Null
+  Copy-Item $exe.FullName $stage -Force
+  Get-ChildItem -Path $exe.DirectoryName -Filter '*.dll' | Copy-Item -Destination $stage -Force
+  Set-Content -Path (Join-Path $stage 'portable.txt') -Value 'portable' -Encoding ASCII
+  Copy-Item (Join-Path $Repo 'docs\CUSTOM_MUSIC_SETUP.md') (Join-Path $stage 'CUSTOM_MUSIC_README.md') -Force
+  if (Test-Path $zip) { Remove-Item $zip -Force }
+  Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
+  Log "release package: $zip"
 
   Log "RESULT: SUCCESS -> $OutDir"
   Set-Content -Path $Status -Value "RESULT: SUCCESS $(Get-Date -Format 'HH:mm:ss') -> $OutDir" -Encoding UTF8

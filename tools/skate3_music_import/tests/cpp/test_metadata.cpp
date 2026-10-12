@@ -71,6 +71,24 @@ int main() {
      200000, false, &m) && m.size() == 1 && m[0].score == 97 && m[0].length_ms == 200000, "odd types tolerated");
   CHECK(ParseRecordingSearch(R"({"recordings":[]})", 0, false, &m) && m.empty(), "no results");
 
+  // ---- title-only: length filter in the query; ties go to the official album, earliest
+  const std::string tu = RecordingSearchUrl({"", "All Of The Lights"}, 25, 300000);
+  CHECK(tu.find("dur%3A%5B294000%20TO%20306000%5D") != std::string::npos && tu.find("limit=25") != std::string::npos,
+        "title-only search is length-filtered");
+  const char* kLights = R"JSON({"recordings":[
+   {"id":"edit","score":100,"title":"All of the Lights","length":299000,"artist-credit":[{"name":"YEMO."}],
+    "releases":[{"id":"r1","title":"Edits Collection","status":"Official","date":"2020",
+      "release-group":{"id":"g1","primary-type":"Album","secondary-types":["Compilation"]}}]},
+   {"id":"orig","score":100,"title":"All of the Lights","length":299600,"artist-credit":[{"name":"Kanye West"}],
+    "releases":[{"id":"r2","title":"My Beautiful Dark Twisted Fantasy","status":"Official","date":"2010-11-22",
+      "release-group":{"id":"g2","primary-type":"Album"}}]},
+   {"id":"later","score":100,"title":"All of the Lights","length":300100,"artist-credit":[{"name":"Cover Band"}],
+    "releases":[{"id":"r3","title":"Covers","status":"Official","date":"2015",
+      "release-group":{"id":"g3","primary-type":"Album"}}]}]})JSON";
+  CHECK(ParseRecordingSearch(kLights, 300000, true, &m) && m[0].recording_id == "orig" &&
+            m[0].artist == "Kanye West" && m[0].confidence >= kAcceptConfidence,
+        "original album wins among equal title-only matches");
+
   // ---- lookup flow with a fake server
   const auto dir = std::filesystem::temp_directory_path() / "s3meta_test";
   std::filesystem::remove_all(dir);
@@ -109,6 +127,15 @@ int main() {
   nothing.length_ms = 100000;
   Info none = Lookup(fake, nothing, dir / "covers", nullptr);
   CHECK(none.source == "none" && none.title.empty(), "not found is remembered as none");
+
+  // MusicBrainz busy: 503 twice, then the answer
+  int busy = 0;
+  HttpGet busy_server = [&](const std::string& u, std::string* body) {
+    if (u.find("musicbrainz.org") != std::string::npos && busy++ < 2) return 503;
+    return fake(u, body);
+  };
+  Info after_busy = Lookup(busy_server, in, dir / "covers", nullptr);
+  CHECK(after_busy.source == "musicbrainz" && after_busy.artist == "Zedd feat. Foxes", "503 is retried");
 
   // offline: stops after the first failure
   size_t calls = 0;

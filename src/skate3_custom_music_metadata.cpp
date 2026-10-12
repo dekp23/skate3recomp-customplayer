@@ -234,9 +234,14 @@ std::string UrlEncode(const std::string& s) {
   return out;
 }
 
-std::string RecordingSearchUrl(const Query& q, int limit) {
+std::string RecordingSearchUrl(const Query& q, int limit, int64_t length_ms) {
   std::string lucene = "recording:\"" + LuceneEscape(q.title) + "\"";
   if (!q.artist.empty()) lucene += " AND artist:\"" + LuceneEscape(q.artist) + "\"";
+  if (q.artist.empty() && length_ms > 0) {
+    // A bare title matches hundreds of covers and edits: keep only plausible lengths.
+    lucene += " AND dur:[" + std::to_string(std::max<int64_t>(0, length_ms - 6000)) + " TO " +
+              std::to_string(length_ms + 6000) + "]";
+  }
   return "https://musicbrainz.org/ws/2/recording/?query=" + UrlEncode(lucene) +
          "&fmt=json&limit=" + std::to_string(limit);
 }
@@ -289,6 +294,8 @@ bool ParseRecordingSearch(const std::string& text, int64_t track_ms, bool title_
         if (s > best || (s == best && date < best_date)) {
           best = s;
           best_date = date;
+          m.release_rank = s;
+          m.release_date = date;
           m.album = Str(rel, "title");
           m.release_id = Str(rel, "id");
           m.release_group_id = rgid;
@@ -308,8 +315,13 @@ bool ParseRecordingSearch(const std::string& text, int64_t track_ms, bool title_
     m.confidence = (m.score / 100.0) * length_factor;
     out->push_back(std::move(m));
   }
-  std::stable_sort(out->begin(), out->end(),
-                   [](const Match& a, const Match& b) { return a.confidence > b.confidence; });
+  // Best confidence first; among (nearly) equal ones the original release: official album,
+  // then the earliest date.
+  std::stable_sort(out->begin(), out->end(), [](const Match& a, const Match& b) {
+    if (std::fabs(a.confidence - b.confidence) > 0.02) return a.confidence > b.confidence;
+    if (a.release_rank != b.release_rank) return a.release_rank > b.release_rank;
+    return a.release_date < b.release_date;
+  });
   return true;
 }
 
@@ -375,14 +387,16 @@ Info Lookup(const HttpGet& get, const LookupInput& in, const fs::path& covers_di
   bool found = false;
   for (const Query& q : BuildQueries(in.file_title, in.tag_title, in.tag_artist)) {
     if (cancel && cancel->load()) return info;
-    const std::string url = RecordingSearchUrl(q);
+    const std::string url = RecordingSearchUrl(q, q.artist.empty() ? 25 : 10, in.length_ms);
     std::string body;
     int status = -1;
-    for (int attempt = 0; attempt < 2; ++attempt) {
+    for (int attempt = 0; attempt < 4; ++attempt) {
       RateLimit();
       status = get(url, &body);
       if (status != 503) break;  // MusicBrainz asks clients to slow down with 503
-      std::this_thread::sleep_for(std::chrono::seconds(2));
+      if (cancel && cancel->load()) return info;
+      say("musicbrainz: busy (503), waiting " + std::to_string(2 << attempt) + " s");
+      std::this_thread::sleep_for(std::chrono::seconds(2 << attempt));
     }
     if (status != 200) {
       say("musicbrainz: HTTP " + std::to_string(status) + " for '" + q.artist + " / " + q.title + "'");

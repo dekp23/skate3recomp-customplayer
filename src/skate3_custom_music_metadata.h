@@ -37,7 +37,8 @@ std::vector<Query> BuildQueries(const std::string& file_title, const std::string
 std::string CleanForSearch(const std::string& s);
 
 std::string UrlEncode(const std::string& s);
-std::string RecordingSearchUrl(const Query& q, int limit = 10);
+// length_ms > 0 restricts title-only searches to recordings of about that length.
+std::string RecordingSearchUrl(const Query& q, int limit = 10, int64_t length_ms = 0);
 std::string CoverUrl(const std::string& release_id);
 std::string ReleaseGroupCoverUrl(const std::string& release_group_id);
 
@@ -47,6 +48,8 @@ struct Match {
   int score = 0;            // MusicBrainz search score (0..100)
   int64_t length_ms = -1;   // recording length, -1 if unknown
   double confidence = 0;    // ours, 0..1
+  int release_rank = -1000; // official album > single/EP > compilation/live (tie-break)
+  std::string release_date; // earliest date of the chosen release (tie-break)
 };
 
 // Parses a /ws/2/recording search response. Candidates are scored against the track

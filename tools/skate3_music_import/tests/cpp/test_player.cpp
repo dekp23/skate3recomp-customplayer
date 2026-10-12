@@ -230,6 +230,23 @@ int main(int argc, char** argv) {
               pl2[4].title == "Song C",
           "reload keeps order/enabled and appends new tracks");
     CHECK(LoadShuffle(dir), "shuffle flag persisted");
+    // Song info from metadata.tsv applies to tracks without tags.
+    {
+      std::ofstream m(dir / "metadata.tsv");
+      m << "track:t0.pcm\tmusicbrainz\tReal A\tArtist A\tAlbum A\trel\trec\t0.95\tc.jpg\n"
+        << "track:t1.pcm\tnone\t\t\t\t\t\t0\t\n";
+    }
+    auto pl3 = LoadPlaylist(dir, {1000, 2000});
+    const PlaylistEntry* a = nullptr;
+    const PlaylistEntry* b = nullptr;
+    for (const auto& e : pl3) {
+      if (e.key() == "track:t0.pcm") a = &e;
+      if (e.key() == "track:t1.pcm") b = &e;
+    }
+    CHECK(a && a->title == "Real A" && a->artist == "Artist A" && a->album == "Album A" &&
+              a->cover.filename() == "c.jpg",
+          "MusicBrainz info applied");
+    CHECK(b && b->title == "Song B", "'none' keeps the file title");
   }
 
   if (g_failures) {

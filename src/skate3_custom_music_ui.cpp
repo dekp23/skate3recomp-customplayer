@@ -122,6 +122,7 @@ PlayerSettings PlayerSettings::Load(const fs::path& dir) {
       if (k == "toasts") s.toasts = v == "1";
       if (k == "fill") s.fill_repeat = v != "original";
       if (k == "volume") s.volume_percent = std::clamp(std::stoi(v), 0, 200);
+      if (k == "lookup") s.online_lookup = v == "1";
     } catch (...) {
     }
   }
@@ -134,7 +135,8 @@ bool PlayerSettings::Save(const fs::path& dir) const {
       << "enabled=" << (enabled ? 1 : 0) << "\n"
       << "toasts=" << (toasts ? 1 : 0) << "\n"
       << "fill=" << (fill_repeat ? "repeat" : "original") << "\n"
-      << "volume=" << volume_percent << "\n";
+      << "volume=" << volume_percent << "\n"
+      << "lookup=" << (online_lookup ? 1 : 0) << "\n";
   return static_cast<bool>(out);
 }
 
@@ -268,6 +270,30 @@ void CustomMusicMenu::RunJob(Job job) {
   }
   const fs::path tracks = dir / library::kTracksDirName;
 
+  auto lookup = [&](bool retry) {
+    SetStatus("Looking up song info on MusicBrainz...");
+    const size_t found = meta::LookupLibrary(
+        dir, MakeHttpGet(), retry,
+        [this](size_t done, size_t total, const std::string& current) {
+          std::lock_guard<std::mutex> lock(job_mutex_);
+          job_progress_ = total ? static_cast<float>(done) / static_cast<float>(total) : -1.0f;
+          job_status_ = current.empty() ? "Song info updated"
+                                        : "Song info " + std::to_string(done + 1) + "/" +
+                                              std::to_string(total) + ": " + current;
+          job_error_ = false;
+        },
+        [](const std::string& line) { REXLOG_INFO("custom music: {}", line); }, &cancel_);
+    ReloadPlaylist(dir);
+    return found;
+  };
+  if (job == Job::kLookup) {
+    const size_t found = lookup(true);
+    SetStatus("Song info: " + std::to_string(found) + " track(s) identified on MusicBrainz.");
+    std::lock_guard<std::mutex> lock(job_mutex_);
+    job_progress_ = -1.0f;
+    return;
+  }
+
   if (job == Job::kAddFiles) {
     SetStatus("Choose tracks in the file picker...");
     const auto files = PickAudioFiles();
@@ -312,11 +338,14 @@ void CustomMusicMenu::RunJob(Job job) {
   });
   ReloadPlaylist(dir);
   const size_t pruned = loaded ? library::RemoveUnusedPcm(dir) : 0;
+  size_t identified = 0;
+  if (settings.online_lookup && !cancel_) identified = lookup(false);
   std::string msg = "Done: " + result.message + " (" + std::to_string(result.converted) +
                     " converted, " + std::to_string(result.reused) + " cached";
   if (result.failed) msg += ", " + std::to_string(result.failed) + " failed";
   if (pruned) msg += ", " + std::to_string(pruned) + " old file(s) removed";
   msg += ")";
+  if (settings.online_lookup) msg += "\nSong info: " + std::to_string(identified) + " new track(s) identified.";
   if (!result.errors.empty()) msg += "\n" + result.errors.front();
   SetStatus(msg, result.failed > 0 || !loaded);
   {
@@ -431,6 +460,15 @@ void CustomMusicMenu::OnDraw(ImGuiIO& io) {
     ImGui::SameLine();
     if (ImGui::Button("Cancel")) cancel_ = true;
   }
+  ImGui::Checkbox("Look up song info online (MusicBrainz)", &settings.online_lookup);
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Sends your tracks' titles to musicbrainz.org to find the real title,\n"
+                      "artist, album and cover art. One request per second.");
+  }
+  ImGui::SameLine();
+  ImGui::BeginDisabled(busy || dir.empty() || !settings.online_lookup);
+  if (ImGui::Button("Look up now")) StartJob(Job::kLookup);
+  ImGui::EndDisabled();
   {
     std::lock_guard<std::mutex> lock(job_mutex_);
     if (busy && job_progress_ >= 0.0f) {
@@ -493,11 +531,13 @@ void CustomMusicMenu::OnDraw(ImGuiIO& io) {
         playlist_dirty_ = true;
       }
       ImGui::TableNextColumn();
+      const std::string label = e.artist.empty() ? e.title : e.artist + " - " + e.title;
       if (playing) {
-        ImGui::TextColored(kAccent, "> %s", e.title.c_str());
+        ImGui::TextColored(kAccent, "> %s", label.c_str());
       } else {
-        ImGui::TextColored(e.enabled ? ImVec4(1, 1, 1, 1) : kMuted, "%s", e.title.c_str());
+        ImGui::TextColored(e.enabled ? ImVec4(1, 1, 1, 1) : kMuted, "%s", label.c_str());
       }
+      if (!e.album.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.album.c_str());
       ImGui::TableNextColumn();
       ImGui::TextColored(kMuted, "%s", e.kind == PlaylistEntry::Kind::kOriginal ? "Skate 3" : "You");
       ImGui::TableNextColumn();
@@ -536,7 +576,8 @@ void CustomMusicMenu::OnDraw(ImGuiIO& io) {
     SavePlaylist(dir, player.playlist(), player.Status().shuffle);
   }
   if (settings.enabled != before.enabled || settings.toasts != before.toasts ||
-      settings.volume_percent != before.volume_percent) {
+      settings.volume_percent != before.volume_percent ||
+      settings.online_lookup != before.online_lookup) {
     settings.ApplyTo(engine);
     std::lock_guard<std::mutex> lock(GlobalUiState().mutex);
     GlobalUiState().settings = settings;

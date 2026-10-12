@@ -1,5 +1,7 @@
 #include "skate3_custom_music_player.h"
 
+#include "skate3_custom_music_metadata.h"
+
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -424,6 +426,28 @@ std::vector<PlaylistEntry> LoadPlaylist(const fs::path& library_dir,
       if (f.size() > 4) e.artist = f[4];
       if (f.size() > 5) e.album = f[5];
       if (e.samples > 0) all.push_back(e);
+    }
+  }
+  // Song info: the file's own tags win; otherwise MusicBrainz results (metadata.tsv).
+  {
+    const auto cache = meta::LoadCache(library_dir);
+    std::error_code ec;
+    for (auto& e : all) {
+      if (e.kind == PlaylistEntry::Kind::kTrack) {
+        const fs::path embedded = fs::path(e.pcm).concat(".cover");
+        if (fs::is_regular_file(embedded, ec)) e.cover = embedded;
+      }
+      const auto it = cache.find(e.key());
+      if (it == cache.end()) continue;
+      const meta::Info& i = it->second;
+      if (i.source != "musicbrainz" && i.source != "manual") continue;
+      const bool has_tags = !e.artist.empty();
+      if (!has_tags || i.source == "manual") {
+        if (!i.title.empty()) e.title = i.title;
+        if (!i.artist.empty()) e.artist = i.artist;
+        if (!i.album.empty()) e.album = i.album;
+      }
+      if (e.cover.empty() && !i.cover.empty()) e.cover = library_dir / "covers" / i.cover;
     }
   }
   // Saved order and on/off: playlist.tsv rows "key<TAB>0|1". New entries go at the end.

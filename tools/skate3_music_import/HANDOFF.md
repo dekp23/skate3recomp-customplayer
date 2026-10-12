@@ -115,14 +115,23 @@ Toolchain on the laptop: LLVM 23.1.3, CMake 4.4.4, Ninja, VS 2026 Build Tools, P
 - [ ] Pause: not offered (game appears to skip a song after ~16 s of silence).
 - [ ] Hotkeys for previous/next: Ctrl+F7/F8 collide; pick others.
 
-### Phase 2 - metadata
-- [ ] ffprobe tags (title / artist / album); ffmpeg extracts embedded cover -> 256x256 RGBA.
-- [ ] MusicBrainz search (cleaned "Artist - Title", strip yt-dlp id and "official video"
-      noise), Cover Art Archive thumbnail; 1 req/s, User-Agent
-      `dekp23-skate3-custom-music ( github.com/dekp23 )`; opt-in toggle; cached.
-- [ ] AcoustID: user's API key entered in F7, `fpcalc` downloaded on first use; also
-      identifies the 46 originals (titles currently unknown).
-- [ ] Manual edit fields in F7.
+### Phase 2 - song info (MusicBrainz only, as asked 2026-10-12; needs in-game test)
+- [x] `skate3_custom_music_metadata`: queries from tags or the file name (noise such as
+      "(Official Video)", "(2024 Remaster)", "(feat. X)" removed; "A - B" tried both ways;
+      title-only last), MusicBrainz recording search, confidence = score x length agreement
+      (accept >= 0.70; title-only needs <= 3 s), original album preferred over compilations
+      /live, Cover Art Archive front-250 (release, then release group). 1 request/s,
+      User-Agent `dekp23-skate3-custom-music/1.0 ( github.com/dekp23 )`, 503 retried once,
+      offline stops at the first failure. Cache `metadata.tsv` (also remembers "none"),
+      covers in `<library>/covers/`. JSON via nlohmann (SDK inja submodule), type-checked
+      access only (no throws).
+- [x] F7: opt-in "Look up song info online (MusicBrainz)" + "Look up now" (also retries
+      tracks not found before); runs automatically after Add/Import/Rescan when on.
+      Playlist shows "Artist - Title", album as tooltip. File tags beat MusicBrainz.
+- [ ] Not possible with MusicBrainz alone: the 46 game songs (no names to search; the
+      soundtrack was never released as an album). Needs the game's own list (Phase 4) or
+      AcoustID.
+- [ ] Manual edit fields (not started).
 
 ### Phase 3 - covers in UI
 - [ ] Pop-up: cover + title + artist + album, dekp23 brand kept. Playlist rows with thumbnails.

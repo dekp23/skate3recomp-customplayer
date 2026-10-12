@@ -23,6 +23,7 @@ struct PlayerSettings {
   bool toasts = true;
   bool fill_repeat = true;
   int volume_percent = 100;
+  bool online_lookup = false;  // MusicBrainz song info (opt-in: sends titles to musicbrainz.org)
 
   static PlayerSettings Load(const std::filesystem::path& library_dir);
   bool Save(const std::filesystem::path& library_dir) const;
@@ -70,7 +71,7 @@ class CustomMusicMenu final : public rex::ui::ImGuiDialog {
   void OnDraw(ImGuiIO& io) override;
 
  private:
-  enum class Job { kRebuild, kAddFiles, kImportMusicFolder };
+  enum class Job { kRebuild, kAddFiles, kImportMusicFolder, kLookup };
   void StartJob(Job job);
   void RunJob(Job job);
   void SetStatus(const std::string& s, bool error = false);

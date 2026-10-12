@@ -4,6 +4,7 @@
 #include <filesystem>
 
 #include "skate3_custom_music_library.h"
+#include "skate3_custom_music_metadata.h"
 
 namespace skate3::custom_music {
 
@@ -19,6 +20,9 @@ constexpr const char* kGuestMusicPath = "\\Device\\Harddisk0\\Partition1\\data\\
 
 // Converts a music file with the runtime's bundled FFmpeg (no external tools).
 library::Converter MakeInGameConverter();
+
+// HTTPS GET for song info lookups (WinHTTP; MusicBrainz User-Agent). -1 elsewhere/offline.
+meta::HttpGet MakeHttpGet();
 
 // Removes the filter and logs usage statistics.
 void Uninstall();

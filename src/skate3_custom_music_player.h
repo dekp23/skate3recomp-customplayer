@@ -38,6 +38,7 @@ struct PlaylistEntry {
   std::filesystem::path pcm;           // kTrack: PCM file
   int64_t samples = 0;                 // length (stereo frames)
   std::string title, artist, album;
+  std::filesystem::path cover;         // cover image file, if any (Phase 3 shows it)
   bool enabled = true;
   // Stable identity for saving: "orig:17" or "track:<pcm file name>".
   std::string key() const;

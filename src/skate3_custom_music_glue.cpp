@@ -17,6 +17,14 @@
 #include <string>
 #include <thread>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <winhttp.h>
+#endif
+
 #include <rex/audio/audio_file_decoder.h>
 #include <rex/audio/xma/frame_filter.h>
 #include <rex/audio/xma/stream_decoder.h>
@@ -265,6 +273,66 @@ Player::OriginalDecoder MakeOriginalDecoder(const std::filesystem::path& game_mu
 }
 
 }  // namespace
+
+meta::HttpGet MakeHttpGet() {
+#if defined(_WIN32)
+  return [](const std::string& url, std::string* body) -> int {
+    body->clear();
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, nullptr, 0);
+    std::wstring wurl(static_cast<size_t>(wlen > 0 ? wlen : 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, wurl.data(), wlen);
+    wurl.resize(wcslen(wurl.c_str()));
+    URL_COMPONENTS c{};
+    c.dwStructSize = sizeof(c);
+    c.dwSchemeLength = c.dwHostNameLength = c.dwUrlPathLength = c.dwExtraInfoLength =
+        static_cast<DWORD>(-1);
+    if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &c)) return -1;
+    const std::wstring host(c.lpszHostName, c.dwHostNameLength);
+    std::wstring path(c.lpszUrlPath, c.dwUrlPathLength);
+    if (c.lpszExtraInfo && c.dwExtraInfoLength) path.append(c.lpszExtraInfo, c.dwExtraInfoLength);
+    std::wstring ua;
+    for (const char* p = meta::kUserAgent; *p; ++p) ua.push_back(static_cast<wchar_t>(*p));
+    HINTERNET session = WinHttpOpen(ua.c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return -1;
+#ifndef WINHTTP_OPTION_IPV6_FAST_FALLBACK
+#define WINHTTP_OPTION_IPV6_FAST_FALLBACK 140
+#endif
+    BOOL fast = TRUE;
+    WinHttpSetOption(session, WINHTTP_OPTION_IPV6_FAST_FALLBACK, &fast, sizeof(fast));
+    WinHttpSetTimeouts(session, 8000, 8000, 15000, 20000);
+    int status = -1;
+    HINTERNET conn = WinHttpConnect(session, host.c_str(), c.nPort, 0);
+    HINTERNET req = conn ? WinHttpOpenRequest(conn, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                              WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                              c.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)
+                         : nullptr;
+    if (req && WinHttpSendRequest(req, L"Accept: application/json\r\n", static_cast<DWORD>(-1),
+                                  WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(req, nullptr)) {
+      DWORD code = 0, size = sizeof(code);
+      WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                          WINHTTP_HEADER_NAME_BY_INDEX, &code, &size, WINHTTP_NO_HEADER_INDEX);
+      status = static_cast<int>(code);
+      DWORD avail = 0;
+      while (WinHttpQueryDataAvailable(req, &avail) && avail > 0 && body->size() < (8u << 20)) {
+        const size_t at = body->size();
+        body->resize(at + avail);
+        DWORD read = 0;
+        if (!WinHttpReadData(req, body->data() + at, avail, &read)) break;
+        body->resize(at + read);
+        if (read == 0) break;
+      }
+    }
+    if (req) WinHttpCloseHandle(req);
+    if (conn) WinHttpCloseHandle(conn);
+    WinHttpCloseHandle(session);
+    return status;
+  };
+#else
+  return [](const std::string&, std::string*) { return -1; };
+#endif
+}
 
 library::Converter MakeInGameConverter() {
   return [](const std::filesystem::path& src, const std::filesystem::path& dst,

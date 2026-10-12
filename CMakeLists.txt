@@ -248,6 +248,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_custom_music_mpf.cpp
     src/skate3_custom_music_mus.cpp
     src/skate3_custom_music_player.cpp
+    src/skate3_custom_music_metadata.cpp
     src/skate3_custom_music_ui.cpp
     src/skate3_demo_path.cpp
     src/skate3_draw_distance.cpp
@@ -302,6 +303,7 @@ target_include_directories(skate3 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_BINARY_DIR}/include
     ${REXSDK_DIR}/thirdparty/xxHash
+    ${REXSDK_DIR}/thirdparty/inja/third_party/include  # nlohmann/json (song info lookups)
 )
 
 set(SKATE3_NATIVE_SHADER_SOURCES

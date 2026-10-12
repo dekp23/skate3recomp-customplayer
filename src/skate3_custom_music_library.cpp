@@ -426,6 +426,108 @@ size_t ImportFiles(const std::vector<fs::path>& files, const fs::path& tracks_di
   return copied;
 }
 
+std::vector<std::vector<uint16_t>> CarrierChains(
+    const std::vector<std::vector<uint32_t>>& segments_by_song, size_t max_extra_nodes,
+    int64_t* min_slot_samples) {
+  // Largest target T such that every slot can reach T with the shared node budget.
+  auto nodes_for = [&](const std::vector<uint32_t>& segs, int64_t target) {
+    int64_t len = 0;
+    size_t n = 0;
+    for (uint16_t k : ChainOfLength(segs.size(), segs.size() + max_extra_nodes)) {
+      if (len >= target && n >= segs.size()) break;
+      len += segs[k];
+      ++n;
+    }
+    return n;
+  };
+  auto extra_for = [&](int64_t target) {
+    size_t extra = 0;
+    for (const auto& segs : segments_by_song) {
+      if (segs.empty()) continue;
+      const size_t n = nodes_for(segs, target);
+      extra += n > segs.size() ? n - segs.size() : 0;
+    }
+    return extra;
+  };
+  int64_t lo = 0, hi = 44100LL * 3600 * 4;
+  while (hi - lo > 44100) {
+    const int64_t mid = lo + (hi - lo) / 2;
+    (extra_for(mid) <= max_extra_nodes ? lo : hi) = mid;
+  }
+  std::vector<std::vector<uint16_t>> chains;
+  int64_t min_len = -1;
+  for (const auto& segs : segments_by_song) {
+    if (segs.empty()) {
+      chains.emplace_back();
+      continue;
+    }
+    chains.push_back(ChainOfLength(segs.size(), nodes_for(segs, lo)));
+    int64_t len = 0;
+    for (uint16_t k : chains.back()) len += segs[k];
+    min_len = min_len < 0 ? len : std::min(min_len, len);
+  }
+  if (min_slot_samples) *min_slot_samples = min_len;
+  return chains;
+}
+
+bool EnsureCarrierLayout(const fs::path& library_dir, const fs::path& game_music_dir,
+                         bool* changed, std::string* message) {
+  if (changed) *changed = false;
+  const auto segments = ReadIndexSegments(library_dir / "ipod.s3fp");
+  std::ifstream mf(game_music_dir / "ipod.mpf", std::ios::binary);
+  std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(mf)), {});
+  if (segments.empty() || bytes.empty()) {
+    if (message) *message = "carrier layout: index or game ipod.mpf missing";
+    return false;
+  }
+  mpf::Graph graph;
+  std::string err;
+  if (!mpf::Parse(bytes, &graph, &err)) {
+    if (message) *message = "carrier layout: " + err;
+    return false;
+  }
+  std::vector<uint32_t> per_song;
+  for (const auto& sg : segments) per_song.push_back(static_cast<uint32_t>(sg.size()));
+  int64_t min_len = 0;
+  const auto chains = CarrierChains(segments, kMaxExtraNodes, &min_len);
+  std::vector<uint8_t> layout;
+  if (!mpf::WriteWithChains(graph, per_song, chains, &layout, &err)) {
+    if (message) *message = "carrier layout: " + err;
+    return false;
+  }
+  const fs::path dst = library_dir / kLayoutFileName;
+  {
+    std::ifstream cur(dst, std::ios::binary);
+    std::vector<uint8_t> existing((std::istreambuf_iterator<char>(cur)), {});
+    if (existing == layout) {
+      if (message) *message = "carrier layout up to date";
+      return true;
+    }
+  }
+  const fs::path tmp = library_dir / (std::string(kLayoutFileName) + ".tmp");
+  {
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(layout.data()), static_cast<std::streamsize>(layout.size()));
+    if (!out) {
+      if (message) *message = "carrier layout: cannot write";
+      return false;
+    }
+  }
+  std::error_code ec;
+  fs::rename(tmp, dst, ec);
+  if (ec) {
+    if (message) *message = "carrier layout: " + ec.message();
+    return false;
+  }
+  if (changed) *changed = true;
+  if (message) {
+    *message = "carrier layout written: every iPod slot >= " +
+               std::to_string(min_len / 44100 / 60) + " min (" + std::to_string(layout.size()) +
+               " bytes)";
+  }
+  return true;
+}
+
 bool EnsureIndex(const fs::path& library_dir, const fs::path& game_music_dir,
                  std::string* message) {
   const fs::path index = library_dir / "ipod.s3fp";
@@ -477,6 +579,7 @@ BuildResult Rebuild(const fs::path& library_dir, const Options& options,
   struct Built {
     std::string pcm, title;
     int64_t samples;
+    std::string source;
   };
   std::vector<Built> built;
   for (size_t i = 0; i < sources.size(); ++i) {
@@ -505,7 +608,7 @@ BuildResult Rebuild(const fs::path& library_dir, const Options& options,
       }
       ++r.converted;
     }
-    built.push_back({name, title, samples});
+    built.push_back({name, title, samples, PathToUtf8(src.filename())});
   }
   if (progress) progress(sources.size(), sources.size(), "");
   if (built.empty()) {
@@ -517,9 +620,33 @@ BuildResult Rebuild(const fs::path& library_dir, const Options& options,
   for (const auto& b : built) lens.push_back(b.samples);
   std::vector<int> assignment;
 
-  // Song-length fitting needs the game's ipod.mpf to rewrite.
+  // Track list for the playlist player.
+  {
+    const fs::path ttmp = library_dir / "tracks.tsv.tmp";
+    {
+      std::ofstream out(ttmp, std::ios::binary | std::ios::trunc);
+      out << "# dekp23 custom music tracks: pcm<TAB>samples<TAB>title<TAB>source\n"
+          << "s3tracks\t1\n";
+      for (size_t i = 0; i < built.size(); ++i) {
+        out << built[i].pcm << '\t' << built[i].samples << '\t' << built[i].title << '\t'
+            << built[i].source << '\n';
+      }
+      if (!out) {
+        r.message = "could not write tracks.tsv";
+        return r;
+      }
+    }
+    std::error_code tec;
+    fs::rename(ttmp, library_dir / "tracks.tsv", tec);
+    if (tec) {
+      r.message = "could not replace tracks.tsv: " + tec.message();
+      return r;
+    }
+  }
+
+  // Legacy song-length fitting needs the game's ipod.mpf to rewrite.
   std::vector<uint8_t> layout;
-  if (!options.game_music_dir.empty()) {
+  if (options.fit_layout && !options.game_music_dir.empty()) {
     std::ifstream mf(options.game_music_dir / "ipod.mpf", std::ios::binary);
     std::vector<uint8_t> mpf_bytes((std::istreambuf_iterator<char>(mf)), {});
     const auto segments = ReadIndexSegments(library_dir / "ipod.s3fp");
@@ -591,13 +718,23 @@ BuildResult Rebuild(const fs::path& library_dir, const Options& options,
 
 size_t RemoveUnusedPcm(const fs::path& library_dir) {
   std::set<std::string> used;
-  std::ifstream in(library_dir / "manifest.tsv");
-  std::string line;
-  while (std::getline(in, line)) {
-    const auto a = line.find('\t');
-    if (a == std::string::npos) continue;
-    const auto b = line.find('\t', a + 1);
-    used.insert(line.substr(a + 1, b == std::string::npos ? std::string::npos : b - a - 1));
+  {
+    std::ifstream in(library_dir / "manifest.tsv");
+    std::string line;
+    while (std::getline(in, line)) {
+      const auto a = line.find('\t');
+      if (a == std::string::npos) continue;
+      const auto b = line.find('\t', a + 1);
+      used.insert(line.substr(a + 1, b == std::string::npos ? std::string::npos : b - a - 1));
+    }
+  }
+  {
+    std::ifstream in(library_dir / "tracks.tsv");
+    std::string line;
+    while (std::getline(in, line)) {
+      const auto a = line.find('\t');
+      if (a != std::string::npos) used.insert(line.substr(0, a));
+    }
   }
   size_t removed = 0;
   std::error_code ec;

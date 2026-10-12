@@ -230,9 +230,8 @@ bool Engine::Load(const std::filesystem::path& dir, const LogFn& log) {
     return fail("index not sorted");
   }
 
-  // ---- manifest
+  // ---- manifest (optional: per-slot tracks; the playlist player does not need it)
   std::ifstream man(dir / "manifest.tsv");
-  if (!man) return fail("cannot open manifest.tsv");
   std::vector<std::unique_ptr<Slot>> slots(num_songs);
   std::string line;
   bool header_ok = false;
@@ -274,7 +273,7 @@ bool Engine::Load(const std::filesystem::path& dir, const LogFn& log) {
     if (!slots[song]) ++assigned;
     slots[song] = std::move(slot);
   }
-  if (!header_ok) return fail("manifest is empty");
+  if (man && !header_ok && line_no > 0) return fail("manifest is empty");
 
   {
     // Old slots (and their open files) are destroyed after the swap, outside the lock.
@@ -349,10 +348,9 @@ bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index
   if (!loaded() || !packet || !pcm_be || channels == 0 || channels > 2) {
     return false;
   }
-  // Position tracking runs even while replacement is switched off, so the now-playing
-  // state and the trace stay correct when it is switched back on.
+  // Position tracking runs even while replacement is switched off, so the playlist
+  // position, now-playing state and trace stay correct when it is switched back on.
   const bool tracing = trace_enabled_.load(std::memory_order_relaxed);
-  if (!enabled() && !tracing) return false;
   std::lock_guard<std::mutex> lock(mutex_);
   ++stats_.frames_seen;
 
@@ -365,36 +363,64 @@ bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index
     SongLayout& song = songs_[hit->song];
     const int32_t prev_song = st.song;
     const int32_t prev_chain_index = st.chain_index;
+    const int32_t prev_last_started = song.last_started;
     const int32_t j = ResolveChainIndex(st, song, hit->segment);
-    if (tracing && (prev_song != static_cast<int32_t>(hit->song) || prev_chain_index != j)) {
-      TraceEvent e;
-      e.kind = TraceEvent::Kind::kSegment;
-      e.t_ms = std::chrono::duration<double, std::milli>(now - epoch_).count();
-      e.context = context_id;
-      e.song = hit->song;
-      e.segment = hit->segment;
-      e.chain_index = j;
-      e.pos = song.timeline[static_cast<size_t>(j)] + hit->offset +
-              static_cast<int64_t>(frame_index) * kSamplesPerFrame;
-      e.slot_length = song.length;
-      PushTrace(e);
-      if (trace_song_ != e.song) {
-        TraceEvent c;
-        c.kind = TraceEvent::Kind::kSongChange;
-        c.t_ms = e.t_ms;
-        c.context = context_id;
-        c.song = e.song;
-        c.pos = e.pos;
-        c.slot_length = song.length;
-        c.from_song = trace_song_;
-        if (trace_song_ >= 0 && static_cast<size_t>(trace_song_) < songs_.size()) {
-          const SongLayout& from = songs_[static_cast<size_t>(trace_song_)];
-          c.from_pos = from.last_pos;
-          c.from_length = from.length;
-          c.gap_ms = std::chrono::duration<double, std::milli>(now - from.last_time).count();
+    if (prev_song != static_cast<int32_t>(hit->song) || prev_chain_index != j) {
+      const int64_t seg_pos = song.timeline[static_cast<size_t>(j)] + hit->offset +
+                              static_cast<int64_t>(frame_index) * kSamplesPerFrame;
+      const double t_ms = std::chrono::duration<double, std::milli>(now - epoch_).count();
+      if (tracing) {
+        TraceEvent e;
+        e.kind = TraceEvent::Kind::kSegment;
+        e.t_ms = t_ms;
+        e.context = context_id;
+        e.song = hit->song;
+        e.segment = hit->segment;
+        e.chain_index = j;
+        e.pos = seg_pos;
+        e.slot_length = song.length;
+        PushTrace(e);
+      }
+      // A different slot, or this slot started over (first segment again).
+      const bool restart = slot_song_ == static_cast<int32_t>(hit->song) && j == 0 &&
+                           prev_last_started > 0;
+      // A late segment of the slot that was just replaced (prefetch overlap) is not a
+      // change back to it.
+      const bool late_prefetch = static_cast<int32_t>(hit->song) == prev_slot_song_ &&
+                                 slot_song_ != prev_slot_song_ &&
+                                 now - slot_change_time_ < std::chrono::seconds(3);
+      if ((slot_song_ != static_cast<int32_t>(hit->song) && !late_prefetch) || restart) {
+        SlotEvent ev;
+        ev.song = hit->song;
+        ev.pos = seg_pos;
+        ev.length = song.length;
+        ev.from_song = slot_song_;
+        ev.restart = restart;
+        double gap_ms = 0;
+        if (slot_song_ >= 0 && static_cast<size_t>(slot_song_) < songs_.size()) {
+          const SongLayout& from = songs_[static_cast<size_t>(slot_song_)];
+          ev.from_pos = from.last_pos;
+          ev.from_length = from.length;
+          gap_ms = std::chrono::duration<double, std::milli>(now - from.last_time).count();
         }
-        PushTrace(c);
-        trace_song_ = e.song;
+        if (tracing) {
+          TraceEvent c;
+          c.kind = TraceEvent::Kind::kSongChange;
+          c.t_ms = t_ms;
+          c.context = context_id;
+          c.song = ev.song;
+          c.pos = ev.pos;
+          c.slot_length = ev.length;
+          c.from_song = ev.from_song;
+          c.from_pos = ev.from_pos;
+          c.from_length = ev.from_length;
+          c.gap_ms = gap_ms;
+          PushTrace(c);
+        }
+        if (renderer_) renderer_->OnSlotStart(ev);
+        if (slot_song_ != ev.song) prev_slot_song_ = slot_song_;
+        slot_song_ = ev.song;
+        slot_change_time_ = now;
       }
     }
     // Exact: decoded frame k of a packet plays at offset + k * 512 within its segment;
@@ -426,18 +452,24 @@ bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index
   last_song_ = st.song;
   last_pos_ = pos;
   last_time_ = now;
-  if (tracing) {
+  {
     SongLayout& cur = songs_[static_cast<size_t>(st.song)];
-    cur.last_pos = pos;
+    cur.last_pos = std::max(cur.last_pos, pos);
+    if (pos < cur.last_pos - static_cast<int64_t>(kSampleRate) * 30) cur.last_pos = pos;  // restart
     cur.last_time = now;
   }
 
   if (!enabled()) return false;
-  Slot* slot = slots_[static_cast<size_t>(st.song)].get();
-  if (!slot) return false;  // song kept as original game audio
-
   int16_t stereo[kSamplesPerFrame * 2];
-  if (!ReadPcm(*slot, pos, stereo)) return false;
+  if (renderer_) {
+    if (!renderer_->Render(st.song, pos, songs_[static_cast<size_t>(st.song)].length, stereo)) {
+      return false;
+    }
+  } else {
+    Slot* slot = slots_[static_cast<size_t>(st.song)].get();
+    if (!slot) return false;  // song kept as original game audio
+    if (!ReadPcm(*slot, pos, stereo)) return false;
+  }
 
   const float g = gain();
   if (g != 1.0f) {
@@ -488,6 +520,13 @@ int32_t Engine::ResolveChainIndex(ContextState& st, SongLayout& song, uint16_t s
   for (; j < n && chain[static_cast<size_t>(j)] < segment; ++j) {
   }
   return std::min(j, n - 1);
+}
+
+void Engine::SetRenderer(Renderer* renderer) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  renderer_ = renderer;
+  slot_song_ = -1;
+  prev_slot_song_ = -1;
 }
 
 void Engine::ResetContext(uint32_t context_id) {

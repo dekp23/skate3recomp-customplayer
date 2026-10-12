@@ -2,7 +2,10 @@
 //
 // Library folder layout (same as tools/skate3_music_import `prepare`):
 //   ipod.s3fp      fingerprint index (built once by the Python tool; never changes)
-//   manifest.tsv   slot -> PCM file, samples, title
+//   tracks.tsv     your converted tracks: PCM file, samples, title, source file
+//   playlist.tsv   playlist order / on-off (written by the player menu)
+//   ipod_layout.mpf  lengthened iPod slots, served to the game as ipod.mpf
+//   manifest.tsv   legacy: slot -> PCM file, samples, title
 //   *.pcm          44.1 kHz stereo s16le
 //   tracks/        your source audio files (any format ffmpeg reads)
 //
@@ -35,7 +38,22 @@ struct Options {
   // set, slots are lengthened/shortened to each track and <library>/ipod_layout.mpf is
   // written; it takes effect the next time the game starts.
   std::filesystem::path game_music_dir;
+  // Legacy per-slot mode: fit slot lengths to the tracks and write ipod_layout.mpf. The
+  // playlist player uses EnsureCarrierLayout() instead.
+  bool fit_layout = false;
 };
+
+// Playlist mode: every iPod slot is lengthened to at least the same duration (as long as
+// the node budget allows, ~20 minutes), so the game rarely changes song by itself; the
+// player decides what is heard. Returns per-song chains.
+std::vector<std::vector<uint16_t>> CarrierChains(
+    const std::vector<std::vector<uint32_t>>& segments_by_song, size_t max_extra_nodes,
+    int64_t* min_slot_samples = nullptr);
+// Writes <library>/ipod_layout.mpf with carrier chains if it is missing or different.
+// Needs ipod.s3fp and the game's ipod.mpf. *changed tells whether the file was written.
+bool EnsureCarrierLayout(const std::filesystem::path& library_dir,
+                         const std::filesystem::path& game_music_dir, bool* changed,
+                         std::string* message);
 
 constexpr const char* kLayoutFileName = "ipod_layout.mpf";
 // Rewritten ipod.mpf node budget: node offsets are 16-bit word offsets (256 KiB).

@@ -1,6 +1,6 @@
 // Skate 3 custom music (dekp23): in-game UI.
 //   NowPlayingToast  - input-transparent "Now playing" pop-up when one of your tracks starts
-//   CustomMusicMenu  - F7 window: on/off, volume, add/import tracks, rebuild, slot table
+//   CustomMusicMenu  - F7 window: transport, on/off, volume, add/import tracks, playlist
 #pragma once
 
 #include <atomic>
@@ -38,6 +38,8 @@ struct UiState {
   std::mutex mutex;
 };
 UiState& GlobalUiState();
+// Loads <library>/tracks.tsv + playlist.tsv into the global player.
+void ReloadPlaylist(const std::filesystem::path& library_dir);
 
 class NowPlayingToast final : public rex::ui::ImGuiDialog {
  public:
@@ -84,6 +86,7 @@ class CustomMusicMenu final : public rex::ui::ImGuiDialog {
   bool job_error_ = false;
   float job_progress_ = -1.0f;
   bool restart_needed_ = false;
+  bool playlist_dirty_ = false;
 };
 
 }  // namespace skate3::custom_music

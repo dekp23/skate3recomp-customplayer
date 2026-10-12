@@ -1,6 +1,7 @@
 #include "skate3_custom_music_ui.h"
 
 #include "skate3_custom_music_library.h"
+#include "skate3_custom_music_player.h"
 
 #include <algorithm>
 #include <cmath>
@@ -141,6 +142,12 @@ void PlayerSettings::ApplyTo(Engine& engine) const {
   engine.SetGain(volume_percent / 100.0f);
 }
 
+void ReloadPlaylist(const fs::path& dir) {
+  const auto lengths = library::ReadIndexSongSamples(dir / "ipod.s3fp");
+  GlobalPlayer().SetPlaylist(LoadPlaylist(dir, lengths));
+  GlobalPlayer().SetShuffle(LoadShuffle(dir));
+}
+
 UiState& GlobalUiState() {
   static UiState state;
   return state;
@@ -149,22 +156,22 @@ UiState& GlobalUiState() {
 // ------------------------------------------------------------------ toast
 
 void NowPlayingToast::OnDraw(ImGuiIO& io) {
-  bool toasts;
+  bool toasts, enabled;
   {
     std::lock_guard<std::mutex> lock(GlobalUiState().mutex);
     toasts = GlobalUiState().settings.toasts;
+    enabled = GlobalUiState().settings.enabled;
   }
-  Engine& engine = GlobalEngine();
-  if (!toasts || !engine.loaded()) return;
+  if (!toasts || !enabled || !GlobalEngine().loaded()) return;
 
   const auto now = Engine::Clock::now();
-  const NowPlaying np = engine.GetNowPlaying(now);
-  if (np.active && np.replaced && np.serial != shown_serial_) {
-    shown_serial_ = np.serial;
+  const PlayerStatus st = GlobalPlayer().Status(now);
+  if (st.active && st.entry >= 0 && st.serial != shown_serial_) {
+    shown_serial_ = st.serial;
     shown_at_ = now;
     show_until_ = now + std::chrono::seconds(6);
   }
-  if (now >= show_until_ || !np.active || !np.replaced) return;
+  if (now >= show_until_ || !st.active || st.entry < 0) return;
 
   using secs = std::chrono::duration<float>;
   const float age = secs(now - shown_at_).count();
@@ -191,16 +198,16 @@ void NowPlayingToast::OnDraw(ImGuiIO& io) {
   ImGui::PopFont();
   PushFontOr(d ? d->ui_font_semibold() : nullptr, 22.0f);
   ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 480.0f);
-  ImGui::TextUnformatted(np.title.c_str());
+  ImGui::TextUnformatted(st.title.c_str());
   ImGui::PopTextWrapPos();
   ImGui::PopFont();
-  const double shown_len = std::min(np.track_seconds, np.slot_seconds);
-  const float frac = shown_len > 0 ? static_cast<float>(np.position_seconds / shown_len) : 0.0f;
+  if (!st.artist.empty()) ImGui::TextColored(kMuted, "%s", st.artist.c_str());
+  const float frac = st.length_seconds > 0 ? static_cast<float>(st.position_seconds / st.length_seconds) : 0.0f;
   ImGui::PushStyleColor(ImGuiCol_PlotHistogram, kAccent);
   ImGui::ProgressBar(std::clamp(frac, 0.0f, 1.0f), ImVec2(-FLT_MIN, 4.0f), "");
   ImGui::PopStyleColor();
-  ImGui::TextColored(kMuted, "%s / %s   iPod slot %u", FormatTime(np.position_seconds).c_str(),
-                     FormatTime(shown_len).c_str(), np.song + 1);
+  ImGui::TextColored(kMuted, "%s / %s%s", FormatTime(st.position_seconds).c_str(),
+                     FormatTime(st.length_seconds).c_str(), st.shuffle ? "   shuffle" : "");
   ImGui::End();
   ImGui::PopStyleColor();
   ImGui::PopStyleVar(3);
@@ -281,14 +288,13 @@ void CustomMusicMenu::RunJob(Job job) {
 
   library::Options opt;
   opt.ffmpeg = library::FindFfmpeg({});
-  opt.fill_repeat = settings.fill_repeat;
   opt.game_music_dir = game_music;
   const auto result = library::Rebuild(
       dir, opt,
       [this](size_t done, size_t total, const std::string& current) {
         std::lock_guard<std::mutex> lock(job_mutex_);
         job_progress_ = total ? static_cast<float>(done) / static_cast<float>(total) : -1.0f;
-        job_status_ = current.empty() ? "Assigning slots..."
+        job_status_ = current.empty() ? "Updating playlist..."
                                       : "Converting " + std::to_string(done + 1) + "/" +
                                             std::to_string(total) + ": " + current;
         job_error_ = false;
@@ -302,25 +308,13 @@ void CustomMusicMenu::RunJob(Job job) {
   const bool loaded = GlobalEngine().Load(dir, [](LogLevel, const std::string& m) {
     REXLOG_INFO("{}", m);
   });
+  ReloadPlaylist(dir);
   const size_t pruned = loaded ? library::RemoveUnusedPcm(dir) : 0;
   std::string msg = "Done: " + result.message + " (" + std::to_string(result.converted) +
                     " converted, " + std::to_string(result.reused) + " cached";
   if (result.failed) msg += ", " + std::to_string(result.failed) + " failed";
   if (pruned) msg += ", " + std::to_string(pruned) + " old file(s) removed";
   msg += ")";
-  if (result.layout_written) {
-    // Song lengths are read by the game at startup; compare with what is running.
-    const auto running = GlobalEngine().chains();
-    bool same = running.size() == result.chains.size();
-    for (size_t i = 0; same && i < running.size(); ++i) {
-      same = result.chains[i].empty() || running[i] == result.chains[i];
-    }
-    if (!same) {
-      msg += "\nNew song lengths take effect after restarting Skate 3.";
-      std::lock_guard<std::mutex> lock(job_mutex_);
-      restart_needed_ = true;
-    }
-  }
   if (!result.errors.empty()) msg += "\n" + result.errors.front();
   SetStatus(msg, result.failed > 0 || !loaded);
   {
@@ -373,52 +367,49 @@ void CustomMusicMenu::OnDraw(ImGuiIO& io) {
   ImGui::PopFont();
   ImGui::Separator();
 
-  // ---- status
-  const auto slots = engine.Slots();
-  const size_t assigned = std::count_if(slots.begin(), slots.end(), [](auto& s) { return s.assigned; });
+  // ---- status + transport
+  Player& player = GlobalPlayer();
+  const PlayerStatus st = player.Status();
   if (!engine.loaded()) {
-    ImGui::TextColored(kBad, "Not active: no music library loaded.");
-    ImGui::TextWrapped("Library folder: %s\nAdd tracks or import your Music folder below to "
-                       "get started.",
-                       PathToUtf8(dir).c_str());
+    ImGui::TextColored(kBad, "Not active: the music index could not be built.");
+    ImGui::TextWrapped("Library folder: %s", PathToUtf8(dir).c_str());
   } else {
     ImGui::TextColored(settings.enabled ? kGood : kWarn, "%s",
-                       settings.enabled ? "Active" : "Paused (game soundtrack plays)");
-    ImGui::SameLine();
-    ImGui::TextColored(kMuted, "  %zu/%zu iPod songs replaced", assigned, slots.size());
-    const NowPlaying np = engine.GetNowPlaying(Engine::Clock::now());
-    if (np.active && np.replaced) {
-      ImGui::TextColored(kAccent, "Now playing:");
+                       settings.enabled ? "Active" : "Off (game soundtrack plays)");
+    if (st.active && st.entry >= 0) {
       ImGui::SameLine();
-      ImGui::TextUnformatted(np.title.c_str());
-      const double len = std::min(np.track_seconds, np.slot_seconds);
+      ImGui::TextColored(kAccent, "  Now playing:");
+      ImGui::SameLine();
+      ImGui::TextUnformatted(st.title.c_str());
       ImGui::PushStyleColor(ImGuiCol_PlotHistogram, kAccent);
-      ImGui::ProgressBar(len > 0 ? static_cast<float>(np.position_seconds / len) : 0.0f,
-                         ImVec2(-FLT_MIN, 6.0f), "");
+      char overlay[48];
+      std::snprintf(overlay, sizeof(overlay), "%s / %s", FormatTime(st.position_seconds).c_str(),
+                    FormatTime(st.length_seconds).c_str());
+      ImGui::ProgressBar(st.length_seconds > 0 ? static_cast<float>(st.position_seconds / st.length_seconds) : 0.0f,
+                         ImVec2(-FLT_MIN, 0.0f), overlay);
       ImGui::PopStyleColor();
-    } else if (np.active) {
-      ImGui::TextColored(kMuted, "Now playing: original game song (slot %u)", np.song + 1);
     } else {
-      ImGui::TextColored(kMuted, "Now playing: nothing from the iPod right now");
+      ImGui::SameLine();
+      ImGui::TextColored(kMuted, "  (the iPod is not playing right now)");
     }
   }
-  ImGui::Spacing();
-
-  // ---- controls
+  if (ImGui::Button("|<  Previous")) player.Previous();
+  ImGui::SameLine();
+  if (ImGui::Button("Next  >|")) player.Next();
+  ImGui::SameLine(0.0f, 24.0f);
+  bool shuffle = st.shuffle;
+  if (ImGui::Checkbox("Shuffle", &shuffle)) {
+    player.SetShuffle(shuffle);
+    playlist_dirty_ = true;
+  }
+  ImGui::SameLine(0.0f, 24.0f);
   ImGui::Checkbox("Use my music", &settings.enabled);
   ImGui::SameLine(0.0f, 24.0f);
-  ImGui::Checkbox("Now-playing pop-ups", &settings.toasts);
+  ImGui::Checkbox("Pop-ups", &settings.toasts);
   ImGui::SetNextItemWidth(260.0f);
   ImGui::SliderInt("Volume", &settings.volume_percent, 0, 200, "%d%%");
-  int fill = settings.fill_repeat ? 0 : 1;
-  ImGui::SetNextItemWidth(260.0f);
-  ImGui::Combo("Leftover slots", &fill, "Repeat my tracks\0Keep game songs\0");
-  settings.fill_repeat = fill == 0;
-  if (settings.fill_repeat != before.fill_repeat) {
-    ImGui::SameLine();
-    ImGui::TextColored(kWarn, "applies on Rebuild");
-  }
 
+  // ---- library
   ImGui::Spacing();
   const bool busy = JobRunning();
   ImGui::BeginDisabled(busy || dir.empty());
@@ -426,7 +417,7 @@ void CustomMusicMenu::OnDraw(ImGuiIO& io) {
   ImGui::SameLine();
   if (ImGui::Button("Import Music folder")) StartJob(Job::kImportMusicFolder);
   ImGui::SameLine();
-  if (ImGui::Button("Rebuild library")) StartJob(Job::kRebuild);
+  if (ImGui::Button("Rescan tracks")) StartJob(Job::kRebuild);
   ImGui::EndDisabled();
   ImGui::SameLine();
   if (ImGui::Button("Open tracks folder")) {
@@ -451,59 +442,83 @@ void CustomMusicMenu::OnDraw(ImGuiIO& io) {
       ImGui::PopTextWrapPos();
     }
   }
-  ImGui::TextColored(kMuted, "Tracks folder: %s",
-                     PathToUtf8(dir / library::kTracksDirName).c_str());
-  bool layout_active;
-  {
-    std::lock_guard<std::mutex> lock(GlobalUiState().mutex);
-    layout_active = GlobalUiState().layout_active;
-  }
-  ImGui::TextColored(layout_active ? kGood : kMuted, "Song lengths: %s",
-                     layout_active ? "fitted to your tracks"
-                                   : "original (Rebuild, then restart, to fit them)");
-  {
-    std::lock_guard<std::mutex> lock(job_mutex_);
-    if (restart_needed_) {
-      ImGui::TextColored(kWarn, "Restart Skate 3 to apply the new song lengths.");
-    }
-  }
 
-  // ---- slot table
+  // ---- playlist
   ImGui::Spacing();
+  const auto entries = player.playlist();
+  size_t on = 0, originals = 0, tracks = 0;
+  for (const auto& e : entries) {
+    on += e.enabled;
+    (e.kind == PlaylistEntry::Kind::kOriginal ? originals : tracks)++;
+  }
+  ImGui::TextColored(kAccent, "PLAYLIST");
+  ImGui::SameLine();
+  ImGui::TextColored(kMuted, "  %zu of %zu on  (%zu game songs, %zu yours)", on, entries.size(),
+                     originals, tracks);
+  auto set_all = [&](PlaylistEntry::Kind kind, bool value) {
+    for (size_t i = 0; i < entries.size(); ++i) {
+      if (entries[i].kind == kind) player.SetEnabled(i, value);
+    }
+    playlist_dirty_ = true;
+  };
+  if (ImGui::SmallButton("Game songs on")) set_all(PlaylistEntry::Kind::kOriginal, true);
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Game songs off")) set_all(PlaylistEntry::Kind::kOriginal, false);
+  ImGui::SameLine();
+  if (ImGui::SmallButton("My tracks on")) set_all(PlaylistEntry::Kind::kTrack, true);
+  ImGui::SameLine();
+  if (ImGui::SmallButton("My tracks off")) set_all(PlaylistEntry::Kind::kTrack, false);
+
   const ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
                              ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
-  if (ImGui::BeginTable("slots", 4, tf, ImVec2(0.0f, -ImGui::GetFrameHeightWithSpacing()))) {
+  if (ImGui::BeginTable("playlist", 5, tf, ImVec2(0.0f, -ImGui::GetFrameHeightWithSpacing()))) {
     ImGui::TableSetupScrollFreeze(0, 1);
-    ImGui::TableSetupColumn("Slot", ImGuiTableColumnFlags_WidthFixed, 48.0f);
-    ImGui::TableSetupColumn("Game song", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-    ImGui::TableSetupColumn("Your track", ImGuiTableColumnFlags_WidthStretch);
-    ImGui::TableSetupColumn("Fit", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+    ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, 34.0f);
+    ImGui::TableSetupColumn("Title", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("From", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+    ImGui::TableSetupColumn("Length", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 96.0f);
     ImGui::TableHeadersRow();
-    const NowPlaying np = engine.GetNowPlaying(Engine::Clock::now());
-    for (const auto& s : slots) {
+    for (size_t i = 0; i < entries.size(); ++i) {
+      const auto& e = entries[i];
+      ImGui::PushID(static_cast<int>(i));
       ImGui::TableNextRow();
-      const bool playing = np.active && np.song == s.song;
+      const bool playing = st.active && st.entry == static_cast<int>(i);
       ImGui::TableNextColumn();
-      ImGui::TextColored(playing ? kAccent : kMuted, playing ? "> %u" : "%u", s.song + 1);
+      bool en = e.enabled;
+      if (ImGui::Checkbox("##on", &en)) {
+        player.SetEnabled(i, en);
+        playlist_dirty_ = true;
+      }
       ImGui::TableNextColumn();
-      ImGui::TextUnformatted(FormatTime(s.song_seconds).c_str());
-      ImGui::TableNextColumn();
-      if (s.assigned) {
-        ImGui::TextUnformatted(s.title.c_str());
+      if (playing) {
+        ImGui::TextColored(kAccent, "> %s", e.title.c_str());
       } else {
-        ImGui::TextColored(kMuted, "(original game song)");
+        ImGui::TextColored(e.enabled ? ImVec4(1, 1, 1, 1) : kMuted, "%s", e.title.c_str());
       }
       ImGui::TableNextColumn();
-      if (s.assigned) {
-        const double diff = s.track_seconds - s.song_seconds;
-        if (std::fabs(diff) < 0.5) {
-          ImGui::TextColored(kGood, "exact");
-        } else if (diff > 0) {
-          ImGui::TextColored(kWarn, "cut %s", FormatTime(diff).c_str());
-        } else {
-          ImGui::TextColored(kMuted, "+%s silence", FormatTime(-diff).c_str());
-        }
+      ImGui::TextColored(kMuted, "%s", e.kind == PlaylistEntry::Kind::kOriginal ? "Skate 3" : "You");
+      ImGui::TableNextColumn();
+      ImGui::TextColored(kMuted, "%s", FormatTime(e.samples / kSampleRate).c_str());
+      ImGui::TableNextColumn();
+      ImGui::BeginDisabled(!e.enabled);
+      if (ImGui::SmallButton("Play")) player.PlayEntry(i);
+      ImGui::EndDisabled();
+      ImGui::SameLine();
+      ImGui::BeginDisabled(i == 0);
+      if (ImGui::ArrowButton("##up", ImGuiDir_Up)) {
+        player.Move(i, -1);
+        playlist_dirty_ = true;
       }
+      ImGui::EndDisabled();
+      ImGui::SameLine();
+      ImGui::BeginDisabled(i + 1 >= entries.size());
+      if (ImGui::ArrowButton("##down", ImGuiDir_Down)) {
+        player.Move(i, +1);
+        playlist_dirty_ = true;
+      }
+      ImGui::EndDisabled();
+      ImGui::PopID();
     }
     ImGui::EndTable();
   }
@@ -514,9 +529,12 @@ void CustomMusicMenu::OnDraw(ImGuiIO& io) {
   ImGui::PopStyleVar(2);
   if (!open) Hide();
 
+  if (playlist_dirty_ && !dir.empty()) {
+    playlist_dirty_ = false;
+    SavePlaylist(dir, player.playlist(), player.Status().shuffle);
+  }
   if (settings.enabled != before.enabled || settings.toasts != before.toasts ||
-      settings.volume_percent != before.volume_percent ||
-      settings.fill_repeat != before.fill_repeat) {
+      settings.volume_percent != before.volume_percent) {
     settings.ApplyTo(engine);
     std::lock_guard<std::mutex> lock(GlobalUiState().mutex);
     GlobalUiState().settings = settings;

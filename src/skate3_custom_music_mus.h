@@ -56,6 +56,23 @@ int32_t LeadSamples(const std::vector<Block>& blocks);
 std::vector<std::vector<uint32_t>> GroupSongs(const std::vector<Segment>& segments,
                                               std::vector<uint32_t>* first_segment = nullptr);
 
+// The game's XMA frame decoder outputs a further 192 samples of delay beyond LeadSamples()
+// (measured against vgmstream and by seam continuity on all 46 songs).
+constexpr int32_t kDecoderExtraDelay = 192;
+
+// Joins the decoded segments of one song (interleaved, `channels` per sample) into the
+// song's PCM: each segment contributes num_samples samples from LeadSamples()+192 on. The
+// frame decoder cannot flush, so up to ~180 samples at a segment's end can be missing;
+// they are filled by linear prediction, and every join is crossfaded over 32 samples from
+// a prediction of the previous segment (removes the decoder's cold-start click).
+// lead[i] = LeadSamples() of segment i.
+std::vector<int16_t> JoinSegments(const std::vector<std::vector<int16_t>>& decoded,
+                                  const std::vector<int32_t>& lead,
+                                  const std::vector<uint32_t>& num_samples, uint32_t channels);
+
+// Linear-prediction extrapolation of `count` samples after x[0..n) (one channel).
+std::vector<double> Extrapolate(const std::vector<double>& x, size_t count);
+
 struct IndexBuildStats {
   size_t packets = 0, unique = 0, duplicates = 0, too_short = 0;
 };

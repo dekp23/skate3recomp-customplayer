@@ -4,6 +4,7 @@
 #include "skate3_custom_music_library.h"
 #include "skate3_custom_music_mpf.h"
 #include "skate3_custom_music_mus.h"
+#include "skate3_custom_music_player.h"
 #include "skate3_custom_music_ui.h"
 
 #include <atomic>
@@ -199,8 +200,67 @@ std::filesystem::path PrepareMusicOverlay(const std::filesystem::path& library,
   std::vector<std::vector<uint16_t>> chain_list;
   for (const auto& c : chains) chain_list.push_back(c.segments);
   GlobalEngine().SetChains(std::move(chain_list));
-  REXLOG_INFO("custom music: song-length layout active ({} nodes)", graph.num_nodes);
+  REXLOG_INFO("custom music: long iPod slots active ({} nodes)", graph.num_nodes);
   return active;
+}
+
+// Decodes one of the game's own iPod songs from Ipod_Stream.mus with the runtime's XMA
+// decoder (worker thread of the player).
+Player::OriginalDecoder MakeOriginalDecoder(const std::filesystem::path& game_music) {
+  struct Shared {
+    std::filesystem::path mus_file;
+    std::vector<mus::Segment> segments;
+    std::vector<uint32_t> first;
+    std::vector<std::vector<uint32_t>> songs;
+  };
+  auto shared = std::make_shared<Shared>();
+  shared->mus_file = game_music / "Ipod_Stream.mus";
+  std::string err;
+  if (!mus::ReadTable(shared->mus_file, &shared->segments, &err)) {
+    REXLOG_WARN("custom music: cannot read the game's iPod songs: {}", err);
+    return {};
+  }
+  shared->songs = mus::GroupSongs(shared->segments, &shared->first);
+  return [shared](uint32_t song, std::vector<int16_t>* pcm) {
+    if (song >= shared->songs.size()) return false;
+    const auto t0 = std::chrono::steady_clock::now();
+    std::ifstream in(shared->mus_file, std::ios::binary);
+    const auto& seg0 = shared->segments[shared->first[song]];
+    rex::audio::XmaStreamDecoder dec;
+    if (!dec.Open(seg0.sample_rate, seg0.channels)) return false;
+    std::vector<std::vector<int16_t>> decoded;
+    std::vector<int32_t> lead;
+    std::vector<uint32_t> counts;
+    std::vector<mus::Block> blocks;
+    std::string e;
+    for (size_t k = 0; k < shared->songs[song].size(); ++k) {
+      const auto& seg = shared->segments[shared->first[song] + k];
+      if (!mus::ReadBlocks(in, seg, &blocks, &e)) {
+        REXLOG_WARN("custom music: song {} segment {}: {}", song, k, e);
+        return false;
+      }
+      const auto packets = mus::PadPackets(blocks);
+      std::vector<int16_t> out;
+      if (dec.DecodeStream(packets.data(), blocks.size(), &out) <= 0) {
+        REXLOG_WARN("custom music: song {} segment {}: XMA decode failed", song, k);
+        return false;
+      }
+      decoded.push_back(std::move(out));
+      lead.push_back(mus::LeadSamples(blocks));
+      counts.push_back(seg.num_samples);
+    }
+    auto joined = mus::JoinSegments(decoded, lead, counts, seg0.channels);
+    if (seg0.channels == 1) {
+      pcm->resize(joined.size() * 2);
+      for (size_t i = 0; i < joined.size(); ++i) (*pcm)[2 * i] = (*pcm)[2 * i + 1] = joined[i];
+    } else {
+      *pcm = std::move(joined);
+    }
+    REXLOG_INFO("custom music: decoded game song {} ({:.0f} s of audio) in {:.0f} ms", song + 1,
+                pcm->size() / 2 / 44100.0,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    return true;
+  };
 }
 
 }  // namespace
@@ -221,6 +281,15 @@ std::filesystem::path Install(const std::filesystem::path& game_data_root) {
       REXLOG_INFO("custom music: {}", msg);
     }
   }
+  {
+    bool changed = false;
+    std::string msg;
+    if (!library::EnsureCarrierLayout(dir, game_music, &changed, &msg)) {
+      REXLOG_WARN("custom music: {}", msg);
+    } else if (changed) {
+      REXLOG_INFO("custom music: {}", msg);
+    }
+  }
   const auto settings = PlayerSettings::Load(dir);
   settings.ApplyTo(GlobalEngine());
   GlobalEngine().Load(dir, [](LogLevel level, const std::string& msg) {
@@ -237,6 +306,17 @@ std::filesystem::path Install(const std::filesystem::path& game_data_root) {
     }
   });
   const auto overlay = PrepareMusicOverlay(dir, game_music);
+  // Playlist player: the game's songs + your tracks, decides what every iPod frame plays.
+  GlobalPlayer().SetOriginalDecoder(MakeOriginalDecoder(game_music));
+  ReloadPlaylist(dir);
+  GlobalEngine().SetRenderer(&GlobalPlayer());
+  {
+    const auto pl = GlobalPlayer().playlist();
+    size_t on = 0;
+    for (const auto& e : pl) on += e.enabled;
+    REXLOG_INFO("custom music: playlist {} entries ({} on), shuffle {}", pl.size(), on,
+                GlobalPlayer().Status().shuffle ? "on" : "off");
+  }
   {
     std::lock_guard<std::mutex> lock(GlobalUiState().mutex);
     GlobalUiState().library_dir = dir;
@@ -264,6 +344,7 @@ std::filesystem::path Install(const std::filesystem::path& game_data_root) {
 void Uninstall() {
   if (!g_installed.exchange(false)) return;
   rex::audio::SetXmaFrameFilter(nullptr);
+  GlobalEngine().SetRenderer(nullptr);
   GlobalEngine().SetTraceEnabled(false);
   g_trace_logger.Stop();
   const Stats st = GlobalEngine().stats();

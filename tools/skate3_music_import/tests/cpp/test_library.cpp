@@ -232,6 +232,7 @@ static void TestFlexible(const fs::path& index, const fs::path& game_music, cons
   library::Options opt;
   opt.ffmpeg = library::FindFfmpeg({});
   opt.game_music_dir = game_music;
+  opt.fit_layout = true;
   const auto r = library::Rebuild(work, opt, nullptr, nullptr);
   CHECK(r.ok && r.layout_written, "rebuild writes layout: " << r.message);
   std::ifstream lf(work / library::kLayoutFileName, std::ios::binary);
@@ -247,6 +248,32 @@ static void TestFlexible(const fs::path& index, const fs::path& game_music, cons
   CHECK(same, "layout chains equal the assignment");
   Engine e;
   CHECK(e.Load(work, nullptr), "engine loads after flexible rebuild");
+
+  // Carrier layout for the playlist player.
+  int64_t min_len = 0;
+  const auto carrier = library::CarrierChains(segs, library::kMaxExtraNodes, &min_len);
+  size_t cextra = 0;
+  for (size_t s = 0; s < 46; ++s) cextra += carrier[s].size() - segs[s].size();
+  std::cout << "carrier: every slot >= " << min_len / 44100.0 / 60 << " min, extra nodes " << cextra << "\n";
+  CHECK(cextra <= library::kMaxExtraNodes && min_len > 44100LL * 60 * 15, "carrier slots >= 15 min within budget");
+  bool changed = false;
+  std::string msg;
+  CHECK(library::EnsureCarrierLayout(work, game_music, &changed, &msg) && changed, "carrier written: " << msg);
+  std::cout << msg << "\n";
+  CHECK(library::EnsureCarrierLayout(work, game_music, &changed, &msg) && !changed, "carrier unchanged second time");
+  std::ifstream cf(work / library::kLayoutFileName, std::ios::binary);
+  std::vector<uint8_t> cb((std::istreambuf_iterator<char>(cf)), {});
+  mpf::Graph cg;
+  std::vector<mpf::SongChain> cc;
+  CHECK(mpf::Parse(cb, &cg, &err) && mpf::ReadChains(cg, per_song, &cc, &err), "carrier parses: " << err);
+  bool csame = cc.size() == 46;
+  for (size_t s = 0; csame && s < 46; ++s) csame = cc[s].segments == carrier[s];
+  CHECK(csame, "carrier chains read back");
+  // tracks.tsv written by the rebuild.
+  std::ifstream tt(work / "tracks.tsv");
+  std::string all((std::istreambuf_iterator<char>(tt)), {});
+  CHECK(all.find("s3tracks\t1") != std::string::npos && all.find("A song") != std::string::npos,
+        "tracks.tsv lists the converted tracks");
 }
 
 int main(int argc, char** argv) {

@@ -89,6 +89,29 @@ struct TraceEvent {
 };
 std::string FormatTrace(const TraceEvent& e);
 
+// The game started (or restarted) an iPod song slot.
+struct SlotEvent {
+  int32_t song = -1;          // slot now playing
+  int64_t pos = 0;            // its position (samples) at the first decoded frame
+  int64_t length = 0;         // its length (samples, current chain)
+  int32_t from_song = -1;     // slot played before (-1: none)
+  int64_t from_pos = 0;       // last position decoded of from_song
+  int64_t from_length = 0;
+  bool restart = false;       // same slot started again from its beginning
+};
+
+// Supplies the audio for iPod frames instead of the per-slot manifest tracks
+// (the playlist player). Called with the engine lock held, on the XMA worker thread:
+// must not block.
+class Renderer {
+ public:
+  virtual ~Renderer() = default;
+  virtual void OnSlotStart(const SlotEvent& e) = 0;
+  // Fills kSamplesPerFrame interleaved stereo samples for slot `song` at `pos`.
+  // Returns false to leave the game's audio untouched.
+  virtual bool Render(int32_t song, int64_t pos, int64_t slot_length, int16_t* stereo) = 0;
+};
+
 enum class LogLevel { kInfo, kWarning, kError };
 using LogFn = std::function<void(LogLevel, const std::string&)>;
 
@@ -145,6 +168,10 @@ class Engine {
 
   Stats stats() const;
 
+  // Non-owning; nullptr returns to per-slot manifest tracks. The renderer must outlive
+  // its registration.
+  void SetRenderer(Renderer* renderer);
+
   // Playback trace (bounded; oldest events dropped). Off by default.
   void SetTraceEnabled(bool on) { trace_enabled_.store(on, std::memory_order_relaxed); }
   std::vector<TraceEvent> DrainTrace();
@@ -174,8 +201,8 @@ class Engine {
     std::vector<int64_t> timeline;           // start of each chain entry in the slot
     int64_t length = 0;                      // total slot length in samples
     int32_t last_started = -1;               // most recently started chain entry
-    int64_t last_pos = 0;                    // trace: last decoded position
-    Clock::time_point last_time{};           // trace: when it was decoded
+    int64_t last_pos = 0;                    // last decoded position
+    Clock::time_point last_time{};           // when it was decoded
   };
 
   const IndexEntry* Lookup(uint64_t hash) const;
@@ -198,10 +225,14 @@ class Engine {
   int64_t last_pos_ = 0;
   Clock::time_point last_time_{};
   uint64_t serial_ = 0;
+  // Slot tracking (segment starts on any context).
+  int32_t slot_song_ = -1;
+  int32_t prev_slot_song_ = -1;
+  Clock::time_point slot_change_time_{};
+  Renderer* renderer_ = nullptr;
   // Trace.
   std::atomic<bool> trace_enabled_{false};
   std::vector<TraceEvent> trace_;
-  int32_t trace_song_ = -1;  // song of the most recent segment start (any context)
   uint64_t trace_dropped_ = 0;
   Clock::time_point epoch_ = Clock::now();
   mutable std::mutex mutex_;

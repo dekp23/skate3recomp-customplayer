@@ -3,6 +3,7 @@
 #include "skate3_custom_music.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <tuple>
 
@@ -141,6 +142,106 @@ std::vector<std::vector<uint32_t>> GroupSongs(const std::vector<Segment>& segmen
     i = j;
   }
   return songs;
+}
+
+std::vector<double> Extrapolate(const std::vector<double>& x, size_t count) {
+  constexpr size_t kOrder = 32;
+  constexpr size_t kContext = 2048;
+  std::vector<double> out;
+  if (count == 0) return out;
+  const size_t n = std::min(kContext, x.size());
+  if (n <= kOrder) {
+    out.assign(count, x.empty() ? 0.0 : x.back());
+    return out;
+  }
+  const double* h = x.data() + (x.size() - n);
+  // Autocorrelation (lightly regularised) and Levinson-Durbin recursion.
+  double r[kOrder + 1];
+  for (size_t lag = 0; lag <= kOrder; ++lag) {
+    double acc = 0;
+    for (size_t i = lag; i < n; ++i) acc += h[i] * h[i - lag];
+    r[lag] = acc;
+  }
+  r[0] *= 1.0001;
+  if (r[0] <= 0) {
+    out.assign(count, 0.0);
+    return out;
+  }
+  double a[kOrder + 1] = {1.0};
+  double err = r[0];
+  for (size_t i = 1; i <= kOrder; ++i) {
+    double acc = r[i];
+    for (size_t j = 1; j < i; ++j) acc += a[j] * r[i - j];
+    const double k = -acc / err;
+    double tmp[kOrder + 1];
+    for (size_t j = 0; j <= i; ++j) tmp[j] = a[j];
+    for (size_t j = 1; j < i; ++j) a[j] = tmp[j] + k * tmp[i - j];
+    a[i] = k;
+    err *= (1.0 - k * k);
+    if (err <= 0) break;
+  }
+  std::vector<double> buf(h + n - kOrder, h + n);
+  out.reserve(count);
+  for (size_t t = 0; t < count; ++t) {
+    double v = 0;
+    for (size_t j = 1; j <= kOrder; ++j) v -= a[j] * buf[buf.size() - j];
+    v = std::clamp(v, -32768.0, 32767.0);
+    out.push_back(v);
+    buf.push_back(v);
+  }
+  return out;
+}
+
+std::vector<int16_t> JoinSegments(const std::vector<std::vector<int16_t>>& decoded,
+                                  const std::vector<int32_t>& lead,
+                                  const std::vector<uint32_t>& num_samples, uint32_t channels) {
+  constexpr size_t kFade = 32;
+  constexpr size_t kContext = 2048;
+  std::vector<int16_t> out;
+  size_t total = 0;
+  for (uint32_t n : num_samples) total += n;
+  out.reserve(total * channels);
+  for (size_t s = 0; s < decoded.size() && s < num_samples.size() && s < lead.size(); ++s) {
+    const auto& d = decoded[s];
+    const size_t avail = d.size() / channels;
+    const size_t start = static_cast<size_t>(std::max(0, lead[s] + kDecoderExtraDelay));
+    const size_t want = num_samples[s];
+    const size_t have = avail > start ? std::min(want, avail - start) : 0;
+    const size_t piece_begin = out.size();
+    out.insert(out.end(), d.begin() + static_cast<std::ptrdiff_t>(start * channels),
+               d.begin() + static_cast<std::ptrdiff_t>((start + have) * channels));
+    // Missing tail: predict from what this segment produced.
+    if (have < want) {
+      const size_t missing = want - have;
+      out.resize(out.size() + missing * channels, 0);
+      for (uint32_t c = 0; c < channels; ++c) {
+        std::vector<double> ch;
+        const size_t from = have > kContext ? have - kContext : 0;
+        for (size_t i = from; i < have; ++i) ch.push_back(out[piece_begin + i * channels + c]);
+        const auto ext = Extrapolate(ch, missing);
+        for (size_t i = 0; i < missing; ++i) {
+          out[piece_begin + (have + i) * channels + c] = static_cast<int16_t>(std::lround(ext[i]));
+        }
+      }
+    }
+    // Crossfade the head of this segment from a prediction of the previous one.
+    if (s > 0 && piece_begin > 0 && want > kFade) {
+      const size_t prev_samples = piece_begin / channels;
+      for (uint32_t c = 0; c < channels; ++c) {
+        std::vector<double> ch;
+        const size_t from = prev_samples > kContext ? prev_samples - kContext : 0;
+        for (size_t i = from; i < prev_samples; ++i) ch.push_back(out[i * channels + c]);
+        const auto ext = Extrapolate(ch, kFade);
+        for (size_t i = 0; i < kFade; ++i) {
+          const double w = static_cast<double>(i + 1) / (kFade + 1);
+          const size_t idx = piece_begin + i * channels + c;
+          const double v = ext[i] * (1.0 - w) + out[idx] * w;
+          out[idx] = static_cast<int16_t>(std::clamp(std::lround(v), -32768L, 32767L));
+        }
+      }
+    }
+  }
+  return out;
 }
 
 bool BuildIndex(const fs::path& mus_file, const fs::path& out_file, IndexBuildStats* stats,

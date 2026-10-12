@@ -247,6 +247,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_custom_music_library.cpp
     src/skate3_custom_music_mpf.cpp
     src/skate3_custom_music_mus.cpp
+    src/skate3_custom_music_player.cpp
     src/skate3_custom_music_ui.cpp
     src/skate3_demo_path.cpp
     src/skate3_draw_distance.cpp

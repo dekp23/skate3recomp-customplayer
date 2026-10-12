@@ -17,7 +17,7 @@ documentation: the "Custom Music" section of the [repo README](../../README.md).
 | `src/skate3_custom_music_ui.*` | F7 menu, now-playing pop-up, `player.ini`. |
 | `src/skate3_custom_music_glue.*` | rexglue wiring: XMA filter, VFS overlay, in-game decoders, WinHTTP. |
 | SDK fork (`custom-music-hook`) | `rex::audio::XmaFrameFilter` hook, `XmaStreamDecoder`, `DecodeAudioFile`, extra FFmpeg components (`thirdparty/ffmpeg-overlay`). |
-| This folder | Python inspector/validator/indexer (read-only), test data generators, C++ tests, `windows/run_build.cmd` (one-click Windows build of this branch into `C:\s3build`). |
+| This folder | Python inspector/validator/indexer (read-only), test data generators, C++ tests, `windows/run_build.cmd` (one-click Windows build of `main` into `C:\s3build`). |
 
 All `src/skate3_custom_music_*` modules except `glue` and `ui` are plain C++17 with no
 rexglue dependency, so they are unit-tested standalone.

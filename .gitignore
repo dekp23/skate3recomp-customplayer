@@ -3,7 +3,8 @@
 /build/
 /generated/
 /generated.backup-*/
-/tools/
+/tools/*
+!/tools/skate3_music_import/
 
 # Local game dump and retail media. Users must provide their own copy.
 /game/

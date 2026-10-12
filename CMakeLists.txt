@@ -242,6 +242,14 @@ include(cmake/CodegenTargets.cmake)
 set(SKATE3_COMMON_SOURCES
     src/exception_compat.cpp
     src/skate3_app_common.cpp
+    src/skate3_custom_music.cpp
+    src/skate3_custom_music_glue.cpp
+    src/skate3_custom_music_library.cpp
+    src/skate3_custom_music_mpf.cpp
+    src/skate3_custom_music_mus.cpp
+    src/skate3_custom_music_player.cpp
+    src/skate3_custom_music_metadata.cpp
+    src/skate3_custom_music_ui.cpp
     src/skate3_demo_path.cpp
     src/skate3_draw_distance.cpp
     src/skate3_fov.cpp
@@ -295,6 +303,7 @@ target_include_directories(skate3 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_BINARY_DIR}/include
     ${REXSDK_DIR}/thirdparty/xxHash
+    ${REXSDK_DIR}/thirdparty/inja/third_party/include  # nlohmann/json (song info lookups)
 )
 
 set(SKATE3_NATIVE_SHADER_SOURCES
@@ -355,6 +364,13 @@ else()
 endif()
 
 target_link_libraries(skate3 PRIVATE rex::runtime)
+
+# Custom music unit tests (plain C++17; run with ctest). Off by default.
+option(SKATE3_CUSTOM_MUSIC_TESTS "Build the custom music tests" OFF)
+if(SKATE3_CUSTOM_MUSIC_TESTS)
+    enable_testing()
+    add_subdirectory(tools/skate3_music_import/tests/cpp ${CMAKE_BINARY_DIR}/custom_music_tests)
+endif()
 rexglue_configure_target(skate3)
 
 if(APPLE)
@@ -363,7 +379,7 @@ if(APPLE)
 endif()
 
 if(WIN32)
-    target_link_libraries(skate3 PRIVATE comdlg32 winhttp d3dcompiler gdiplus)
+    target_link_libraries(skate3 PRIVATE comdlg32 winhttp d3dcompiler gdiplus shell32 ole32 uuid)
 endif()
 
 add_custom_target(skate3_stage_runtime_library

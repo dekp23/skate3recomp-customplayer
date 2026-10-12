@@ -1,5 +1,7 @@
 #include "skate3_app_common.h"
 
+#include "skate3_custom_music_glue.h"
+#include "skate3_custom_music.h"
 #include "skate3_demo_path.h"
 #include "skate3_fov.h"
 #include "skate3_iso_installer.h"
@@ -681,6 +683,12 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
   // skate3_native_render_mode_indicator shows it live). Input-transparent,
   // so it never affects cursor or focus handling.
   render_mode_indicator_ = std::make_unique<skate3::RenderModeIndicator>(drawer);
+  // dekp23 custom music: now-playing pop-up (input-transparent) and the F7 music menu.
+  music_toast_ = std::make_unique<skate3::custom_music::NowPlayingToast>(drawer);
+  music_menu_ = std::make_unique<skate3::custom_music::CustomMusicMenu>(drawer);
+  music_menu_->set_on_hidden([this] { ApplyGameplayCursorMode(); });
+  rex::ui::RegisterBind("bind_skate3_custom_music", "F7", "dekp23 custom music menu",
+                        [this] { ToggleCustomMusicMenu(); });
   rex::ui::RegisterBind("bind_skate3_menu", "Escape", "Skate 3 settings", [this] {
     // Escape backs out of the settings screen level by level (rows ->
     // category rail -> closed); when the screen is closed it opens it.
@@ -751,7 +759,9 @@ void Skate3BaseApp::OnPostSetup() {
 
   if (auto* input_system = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
     input_system->SetActiveCallback([this]() {
-      const bool settings_visible = simple_settings_dialog_ && simple_settings_dialog_->visible();
+      const bool settings_visible =
+          (simple_settings_dialog_ && simple_settings_dialog_->visible()) ||
+          (music_menu_ && music_menu_->visible());
       const bool xam_ui_active = rex::kernel::xam::xeXamIsUIActive();
       // The drone cam owns the keyboard while flying: keep guest input off
       // so the fly keys don't also steer the skater.
@@ -784,6 +794,22 @@ void Skate3BaseApp::OnPostSetup() {
   }
   InstallDlcPackages();
   InstallRecipeOverlay();
+  if (const auto music_overlay = skate3::custom_music::Install(runtime()->game_data_root());
+      !music_overlay.empty() && runtime()->file_system()) {
+    // Song-length layout: serve <library>/game_music (hard links + rewritten ipod.mpf)
+    // in place of the game's music folder. The original files are not modified.
+    auto device = std::make_unique<rex::filesystem::HostPathDevice>("skate3music:",
+                                                                     music_overlay, true);
+    if (device->Initialize()) {
+      runtime()->file_system()->RegisterDevice(std::move(device));
+      runtime()->file_system()->RegisterSymbolicLink(skate3::custom_music::kGuestMusicPath,
+                                                     "skate3music:");
+      REXLOG_INFO("custom music: music folder overlay mounted from {}",
+                  music_overlay.string());
+    } else {
+      REXLOG_WARN("custom music: could not mount music overlay {}", music_overlay.string());
+    }
+  }
 
   // Register retail multi-entry-function alternate entries.
 #if !SKATE3_HAS_TITLE_UPDATE
@@ -814,17 +840,21 @@ void Skate3BaseApp::OnPostSetup() {
 }
 
 void Skate3BaseApp::OnShutdown() {
+  skate3::custom_music::Uninstall();
   rex::ui::UnregisterBind("bind_skate3_menu");
   rex::ui::UnregisterBind("bind_skate3_menu_alt");
   rex::ui::UnregisterBind("bind_skate3_save_draw_fingerprints");
   rex::ui::UnregisterBind("bind_skate3_log_debug_marker");
   rex::ui::UnregisterBind("bind_skate3_log_user_marker");
   rex::ui::UnregisterBind("bind_skate3_native_debug");
+  rex::ui::UnregisterBind("bind_skate3_custom_music");
   ApplyGameplayCursorMode();
   skate3::native_scene::SetSettingsMenuBlur(false);
   simple_settings_dialog_.reset();
   native_debug_dialog_.reset();
   render_mode_indicator_.reset();
+  music_menu_.reset();
+  music_toast_.reset();
 }
 
 void Skate3BaseApp::ToggleSimpleSettings() {
@@ -941,6 +971,18 @@ void Skate3BaseApp::ToggleNativeDebug() {
   } else {
     ApplySettingsCursorMode();
     native_debug_dialog_->Show();
+  }
+}
+
+void Skate3BaseApp::ToggleCustomMusicMenu() {
+  if (!music_menu_) {
+    return;
+  }
+  if (music_menu_->visible()) {
+    music_menu_->Hide();  // on_hidden restores the gameplay cursor
+  } else {
+    ApplySettingsCursorMode();
+    music_menu_->Show();
   }
 }
 
@@ -1065,7 +1107,8 @@ void Skate3BaseApp::SaveDrawFingerprintLog() {
 
 void Skate3BaseApp::LogUserMarker() {
   const uint32_t marker = debug_marker_count_.fetch_add(1, std::memory_order_relaxed) + 1;
-  REXLOG_WARN("USER LOG MARKER #{}: F10 pressed", marker);
+  REXLOG_WARN("USER LOG MARKER #{}: F10 pressed (MUSICTRACE t={:.1f})", marker,
+              skate3::custom_music::GlobalEngine().TraceNowMs());
 }
 
 void Skate3BaseApp::LogDebugMarker() {

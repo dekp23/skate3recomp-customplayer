@@ -1,6 +1,7 @@
 #include "skate3_custom_music.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -345,19 +346,57 @@ bool Engine::ReadPcm(Slot& slot, int64_t pos, int16_t* out) {
 
 bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index,
                      uint32_t channels, uint8_t* pcm_be) {
-  if (!loaded() || !enabled() || !packet || !pcm_be || channels == 0 || channels > 2) {
+  if (!loaded() || !packet || !pcm_be || channels == 0 || channels > 2) {
     return false;
   }
+  // Position tracking runs even while replacement is switched off, so the now-playing
+  // state and the trace stay correct when it is switched back on.
+  const bool tracing = trace_enabled_.load(std::memory_order_relaxed);
+  if (!enabled() && !tracing) return false;
   std::lock_guard<std::mutex> lock(mutex_);
   ++stats_.frames_seen;
 
+  const auto now = Clock::now();
   ContextState& st = contexts_[context_id];
   const IndexEntry* hit = Lookup(Fingerprint(packet));
   int64_t pos;
   if (hit) {
     ++stats_.frames_matched;
     SongLayout& song = songs_[hit->song];
+    const int32_t prev_song = st.song;
+    const int32_t prev_chain_index = st.chain_index;
     const int32_t j = ResolveChainIndex(st, song, hit->segment);
+    if (tracing && (prev_song != static_cast<int32_t>(hit->song) || prev_chain_index != j)) {
+      TraceEvent e;
+      e.kind = TraceEvent::Kind::kSegment;
+      e.t_ms = std::chrono::duration<double, std::milli>(now - epoch_).count();
+      e.context = context_id;
+      e.song = hit->song;
+      e.segment = hit->segment;
+      e.chain_index = j;
+      e.pos = song.timeline[static_cast<size_t>(j)] + hit->offset +
+              static_cast<int64_t>(frame_index) * kSamplesPerFrame;
+      e.slot_length = song.length;
+      PushTrace(e);
+      if (trace_song_ != e.song) {
+        TraceEvent c;
+        c.kind = TraceEvent::Kind::kSongChange;
+        c.t_ms = e.t_ms;
+        c.context = context_id;
+        c.song = e.song;
+        c.pos = e.pos;
+        c.slot_length = song.length;
+        c.from_song = trace_song_;
+        if (trace_song_ >= 0 && static_cast<size_t>(trace_song_) < songs_.size()) {
+          const SongLayout& from = songs_[static_cast<size_t>(trace_song_)];
+          c.from_pos = from.last_pos;
+          c.from_length = from.length;
+          c.gap_ms = std::chrono::duration<double, std::milli>(now - from.last_time).count();
+        }
+        PushTrace(c);
+        trace_song_ = e.song;
+      }
+    }
     // Exact: decoded frame k of a packet plays at offset + k * 512 within its segment;
     // frame_index -1 is a frame that began in the previous packet. Samples the game trims
     // (decoder delay at segment start, overrun at segment end) map outside the segment
@@ -381,14 +420,19 @@ bool Engine::OnFrame(uint32_t context_id, const uint8_t* packet, int frame_index
   st.next_pos = pos + kSamplesPerFrame;
 
   // Now-playing: a different song, or the same song after a pause, counts as a new start.
-  const auto now = Clock::now();
   if (st.song != last_song_ || now - last_time_ > std::chrono::seconds(3)) {
     ++serial_;
   }
   last_song_ = st.song;
   last_pos_ = pos;
   last_time_ = now;
+  if (tracing) {
+    SongLayout& cur = songs_[static_cast<size_t>(st.song)];
+    cur.last_pos = pos;
+    cur.last_time = now;
+  }
 
+  if (!enabled()) return false;
   Slot* slot = slots_[static_cast<size_t>(st.song)].get();
   if (!slot) return false;  // song kept as original game audio
 
@@ -448,7 +492,61 @@ int32_t Engine::ResolveChainIndex(ContextState& st, SongLayout& song, uint16_t s
 
 void Engine::ResetContext(uint32_t context_id) {
   std::lock_guard<std::mutex> lock(mutex_);
-  contexts_.erase(context_id);
+  auto it = contexts_.find(context_id);
+  if (it == contexts_.end()) return;
+  // Only contexts that played iPod audio are traced (resets are frequent for SFX).
+  if (trace_enabled_.load(std::memory_order_relaxed) && it->second.song >= 0) {
+    TraceEvent e;
+    e.kind = TraceEvent::Kind::kReset;
+    e.t_ms = std::chrono::duration<double, std::milli>(Clock::now() - epoch_).count();
+    e.context = context_id;
+    e.song = it->second.song;
+    e.pos = it->second.next_pos;
+    PushTrace(e);
+  }
+  contexts_.erase(it);
+}
+
+void Engine::PushTrace(TraceEvent e) {
+  // Caller holds mutex_. Bounded so a stalled drain cannot grow memory.
+  constexpr size_t kMaxTrace = 4096;
+  if (trace_.size() >= kMaxTrace) {
+    trace_.erase(trace_.begin(), trace_.begin() + kMaxTrace / 2);
+    trace_dropped_ += kMaxTrace / 2;
+  }
+  trace_.push_back(e);
+}
+
+std::vector<TraceEvent> Engine::DrainTrace() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<TraceEvent> out;
+  out.swap(trace_);
+  return out;
+}
+
+std::string FormatTrace(const TraceEvent& e) {
+  char buf[256];
+  const auto sec = [](int64_t samples) { return static_cast<double>(samples) / kSampleRate; };
+  switch (e.kind) {
+    case TraceEvent::Kind::kSegment:
+      std::snprintf(buf, sizeof(buf),
+                    "MUSICTRACE t=%.1f SEG ctx=%u song=%d seg=%d chain=%d pos=%.3f len=%.3f",
+                    e.t_ms, e.context, e.song, e.segment, e.chain_index, sec(e.pos),
+                    sec(e.slot_length));
+      break;
+    case TraceEvent::Kind::kSongChange:
+      std::snprintf(buf, sizeof(buf),
+                    "MUSICTRACE t=%.1f SONG ctx=%u from=%d from_pos=%.3f from_len=%.3f "
+                    "to=%d to_pos=%.3f to_len=%.3f gap_ms=%.1f",
+                    e.t_ms, e.context, e.from_song, sec(e.from_pos), sec(e.from_length), e.song,
+                    sec(e.pos), sec(e.slot_length), e.gap_ms);
+      break;
+    case TraceEvent::Kind::kReset:
+      std::snprintf(buf, sizeof(buf), "MUSICTRACE t=%.1f RESET ctx=%u song=%d pos=%.3f",
+                    e.t_ms, e.context, e.song, sec(e.pos));
+      break;
+  }
+  return buf;
 }
 
 NowPlaying Engine::GetNowPlaying(Clock::time_point now, Clock::duration window) const {

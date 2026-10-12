@@ -86,6 +86,7 @@ static int RunReplay(const std::string& dir, const std::string& sim_path,
     e.SetChains(chains);
   }
   std::vector<std::string> logs;
+  e.SetTraceEnabled(true);
   CHECK(e.Load(dir, [&](LogLevel, const std::string& s) { logs.push_back(s); std::cout << s << "\n"; }),
         "engine load");
   if (!e.loaded()) return 1;
@@ -137,6 +138,19 @@ static int RunReplay(const std::string& dir, const std::string& sim_path,
       }
     }
   }
+  // Playback trace: segment starts and song changes must be reported.
+  size_t seg_events = 0, song_events = 0, reset_events = 0;
+  const auto trace = e.DrainTrace();
+  for (const auto& ev : trace) {
+    if (ev.kind == TraceEvent::Kind::kSegment) ++seg_events;
+    if (ev.kind == TraceEvent::Kind::kSongChange) ++song_events;
+    if (ev.kind == TraceEvent::Kind::kReset) ++reset_events;
+  }
+  for (size_t i = 0; i < trace.size() && i < 4; ++i) std::cout << FormatTrace(trace[i]) << "\n";
+  std::cout << "trace: segments=" << seg_events << " song_changes=" << song_events
+            << " resets=" << reset_events << "\n";
+  CHECK(seg_events > 0 && song_events > 0, "trace must report segment starts and song changes");
+
   const Stats st = e.stats();
   std::cout << "replay: frames=" << frames << " expected_override=" << expected_override
             << " got_override=" << got_override << " bad_samples=" << bad_samples

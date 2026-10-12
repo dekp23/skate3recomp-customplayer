@@ -1,6 +1,7 @@
 #include "skate3_app_common.h"
 
 #include "skate3_custom_music_glue.h"
+#include "skate3_custom_music.h"
 #include "skate3_demo_path.h"
 #include "skate3_fov.h"
 #include "skate3_iso_installer.h"
@@ -1106,7 +1107,8 @@ void Skate3BaseApp::SaveDrawFingerprintLog() {
 
 void Skate3BaseApp::LogUserMarker() {
   const uint32_t marker = debug_marker_count_.fetch_add(1, std::memory_order_relaxed) + 1;
-  REXLOG_WARN("USER LOG MARKER #{}: F10 pressed", marker);
+  REXLOG_WARN("USER LOG MARKER #{}: F10 pressed (MUSICTRACE t={:.1f})", marker,
+              skate3::custom_music::GlobalEngine().TraceNowMs());
 }
 
 void Skate3BaseApp::LogDebugMarker() {

@@ -67,6 +67,28 @@ struct NowPlaying {
   uint64_t serial = 0;        // increments every time a different song starts
 };
 
+// Diagnostic trace of iPod playback (Phase 0: how the game moves between songs).
+struct TraceEvent {
+  enum class Kind : uint8_t {
+    kSegment,     // a context started decoding a segment
+    kSongChange,  // a segment of a different song started (on any context)
+    kReset,       // the game reset/released an XMA context
+  };
+  Kind kind = Kind::kSegment;
+  double t_ms = 0;            // steady clock, ms since the engine was created
+  uint32_t context = 0;
+  int32_t song = -1;          // kSegment: song; kSongChange: new song
+  int32_t segment = -1;       // kSegment: segment within the song
+  int32_t chain_index = -1;   // kSegment: occurrence in the slot chain
+  int64_t pos = 0;            // kSegment / kSongChange: slot position (samples)
+  int64_t slot_length = 0;    // length of `song`'s slot (samples)
+  int32_t from_song = -1;     // kSongChange
+  int64_t from_pos = 0;       // kSongChange: last position decoded of from_song
+  int64_t from_length = 0;    // kSongChange: from_song's slot length
+  double gap_ms = 0;          // kSongChange: time since from_song's last frame
+};
+std::string FormatTrace(const TraceEvent& e);
+
 enum class LogLevel { kInfo, kWarning, kError };
 using LogFn = std::function<void(LogLevel, const std::string&)>;
 
@@ -123,7 +145,16 @@ class Engine {
 
   Stats stats() const;
 
+  // Playback trace (bounded; oldest events dropped). Off by default.
+  void SetTraceEnabled(bool on) { trace_enabled_.store(on, std::memory_order_relaxed); }
+  std::vector<TraceEvent> DrainTrace();
+  // Time base of TraceEvent::t_ms, for correlating other log lines (e.g. F10 markers).
+  double TraceNowMs() const {
+    return std::chrono::duration<double, std::milli>(Clock::now() - epoch_).count();
+  }
+
  private:
+  void PushTrace(TraceEvent e);
   struct IndexEntry {
     uint64_t hash;
     uint16_t song;
@@ -143,6 +174,8 @@ class Engine {
     std::vector<int64_t> timeline;           // start of each chain entry in the slot
     int64_t length = 0;                      // total slot length in samples
     int32_t last_started = -1;               // most recently started chain entry
+    int64_t last_pos = 0;                    // trace: last decoded position
+    Clock::time_point last_time{};           // trace: when it was decoded
   };
 
   const IndexEntry* Lookup(uint64_t hash) const;
@@ -165,6 +198,12 @@ class Engine {
   int64_t last_pos_ = 0;
   Clock::time_point last_time_{};
   uint64_t serial_ = 0;
+  // Trace.
+  std::atomic<bool> trace_enabled_{false};
+  std::vector<TraceEvent> trace_;
+  int32_t trace_song_ = -1;  // song of the most recent segment start (any context)
+  uint64_t trace_dropped_ = 0;
+  Clock::time_point epoch_ = Clock::now();
   mutable std::mutex mutex_;
 };
 

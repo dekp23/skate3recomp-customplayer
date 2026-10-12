@@ -6,10 +6,12 @@
 #include "skate3_custom_music_ui.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <fstream>
 #include <iterator>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include <rex/audio/xma/frame_filter.h>
 #include <rex/cvar.h>
@@ -24,11 +26,54 @@ REXCVAR_DEFINE_STRING(skate3_custom_music_dir, "", "Skate 3",
                       "Custom music folder (default: custom_music next to the executable, "
                       "else <game>/data/audio/music/custom)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(skate3_custom_music_trace, true, "Skate 3",
+                    "Log iPod playback events (MUSICTRACE lines: segment starts, song "
+                    "changes, context resets) for diagnosing song transitions")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace skate3::custom_music {
 namespace {
 
 std::atomic<bool> g_installed{false};
+
+// Writes the engine's playback trace to the log from a background thread, so the audio
+// thread never does log I/O.
+class TraceLogger {
+ public:
+  void Start() {
+    if (thread_.joinable()) return;
+    stop_ = false;
+    thread_ = std::thread([this] {
+      std::unique_lock<std::mutex> lock(mutex_);
+      while (!stop_) {
+        cv_.wait_for(lock, std::chrono::milliseconds(250));
+        lock.unlock();
+        Flush();
+        lock.lock();
+      }
+    });
+  }
+  void Stop() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stop_ = true;
+    }
+    cv_.notify_all();
+    if (thread_.joinable()) thread_.join();
+    Flush();
+  }
+
+ private:
+  static void Flush() {
+    for (const auto& e : GlobalEngine().DrainTrace()) REXLOG_INFO("{}", FormatTrace(e));
+  }
+  std::thread thread_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool stop_ = false;
+};
+
+TraceLogger g_trace_logger;
 std::atomic<bool> g_first_override_logged{false};
 
 bool OnFrame(void*, uint32_t context_id, const uint8_t* packet, int frame_index,
@@ -158,6 +203,11 @@ std::filesystem::path Install(const std::filesystem::path& game_data_root) {
   filter.on_frame = &OnFrame;
   filter.on_context_reset = &OnContextReset;
   rex::audio::SetXmaFrameFilter(&filter);
+  if (REXCVAR_GET(skate3_custom_music_trace)) {
+    GlobalEngine().SetTraceEnabled(true);
+    g_trace_logger.Start();
+    REXLOG_INFO("custom music: playback trace on (MUSICTRACE lines; F10 writes a marker)");
+  }
   g_installed = true;
   return overlay;
 }
@@ -165,6 +215,8 @@ std::filesystem::path Install(const std::filesystem::path& game_data_root) {
 void Uninstall() {
   if (!g_installed.exchange(false)) return;
   rex::audio::SetXmaFrameFilter(nullptr);
+  GlobalEngine().SetTraceEnabled(false);
+  g_trace_logger.Stop();
   const Stats st = GlobalEngine().stats();
   REXLOG_INFO(
       "custom music stats: frames seen={} matched={} bridged={} replaced={} resyncs={}",
